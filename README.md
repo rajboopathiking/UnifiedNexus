@@ -173,6 +173,56 @@ npx -y @modelcontextprotocol/inspector http://localhost:8000/mcp
 
 ---
 
+**Here's a simple example of how to use APIRouter with UnifiedNexus framework:**
+```python
+from fastapi import APIRouter
+from pydantic import BaseModel
+from unified_nexus import UnifiedNexus
+
+nexus = UnifiedNexus("My API")
+
+# ── 1. Create a router ──────────────────────────────────────
+user_router = APIRouter()
+
+class UserCreate(BaseModel):
+    name: str
+    email: str
+
+# ── 2. Attach endpoints to the router using @nexus.universal_tool ──
+@nexus.universal_tool(path="/", tags=["Users"], router=user_router)
+def get_users():
+    """Get all users"""
+    return {"users": ["Alice", "Bob"]}
+
+@nexus.universal_tool(path="/{user_id}", tags=["Users"], router=user_router)
+def get_user(user_id: int):
+    """Get a single user"""
+    return {"user_id": user_id, "name": "Alice"}
+
+@nexus.universal_tool(path="/", tags=["Users"], router=user_router)
+def create_user(user: UserCreate):
+    """Create a new user"""
+    return {"message": f"Created {user.name}"}
+
+# ── 3. Register the router with a prefix ────────────────────
+nexus.include_router(user_router, prefix="/users", tags=["Users"])
+
+# ── 4. Finalize ─────────────────────────────────────────────
+app = nexus.finalize()
+```
+How it works, step by step:
+
+Create a router — APIRouter() is just a mini-app that groups related routes together (like all /users endpoints).
+Attach routes to it — pass router=user_router to @nexus.universal_tool. This tells the framework "put this route on the router, not the main app."
+Register with a prefix — nexus.include_router(user_router, prefix="/users") mounts all those routes under /users, so your final URLs become:
+
+GET /users/ → get_users
+GET /users/{user_id} → get_user
+POST /users/ → create_user
+
+
+Call finalize() — this wires everything together (FastAPI + MCP).
+
 ## Requirements
 
 - Python 3.11+
