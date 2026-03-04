@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Unified Nexus — One Decorator. Two Interfaces.</title>
+<meta name="description" content="Unified Nexus is a Python framework that bridges FastAPI and MCP — define once, serve everywhere.">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #050810;
+  --surface: #0c1120;
+  --surface2: #101828;
+  --border: #1a2540;
+  --border2: #243050;
+  --accent: #00f5c4;
+  --accent2: #7b61ff;
+  --accent3: #ff6b35;
+  --text: #e8edf8;
+  --muted: #6b7a99;
+  --muted2: #4a5870;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+body::before {
+  content:'';
+  position:fixed; inset:0;
+  background-image:
+    linear-gradient(rgba(0,245,196,0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,245,196,0.025) 1px, transparent 1px);
+  background-size: 48px 48px;
+  pointer-events:none; z-index:0;
+}
+
+/* NAV */
+nav {
+  position: sticky; top:0; z-index: 100;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 40px; height: 60px;
+  background: rgba(5,8,16,0.88);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.nav-logo { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 18px; }
+.nav-logo span { color: var(--accent); }
+.nav-links { display:flex; gap:28px; }
+.nav-links a {
+  font-family: 'Space Mono', monospace; font-size: 11px;
+  color: var(--muted); text-decoration: none;
+  letter-spacing: 0.1em; text-transform: uppercase; transition: color 0.2s;
+}
+.nav-links a:hover { color: var(--accent); }
+.nav-cta {
+  font-family: 'Space Mono', monospace; font-size: 11px;
+  padding: 7px 16px; border: 1px solid var(--accent);
+  color: var(--accent); text-decoration: none; border-radius: 2px;
+  letter-spacing: 0.08em; transition: background 0.2s, color 0.2s;
+}
+.nav-cta:hover { background: var(--accent); color: var(--bg); }
+
+/* HERO */
+.hero {
+  position: relative; z-index: 1;
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center; padding: 80px 32px;
+}
+.hero-glow {
+  position: absolute; width: 700px; height: 700px;
+  background: radial-gradient(circle, rgba(0,245,196,0.07) 0%, transparent 70%);
+  top: 50%; left: 50%; transform: translate(-50%, -60%);
+  pointer-events: none;
+}
+.hero-inner { max-width: 780px; position:relative; z-index:1; }
+
+.hero-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: 'Space Mono', monospace; font-size: 11px;
+  color: var(--accent); border: 1px solid rgba(0,245,196,0.3);
+  padding: 5px 16px; border-radius: 20px; margin-bottom: 32px;
+  background: rgba(0,245,196,0.04);
+  animation: fadeUp 0.6s ease both;
+}
+.hero-badge-dot { width:7px; height:7px; border-radius:50%; background:var(--accent); animation: pulse 2s infinite; }
+
+.hero h1 {
+  font-family: 'Syne', sans-serif;
+  font-size: clamp(56px, 10vw, 104px);
+  font-weight: 800; line-height: 0.9;
+  letter-spacing: -0.04em; margin-bottom: 10px;
+  animation: fadeUp 0.6s 0.1s ease both;
+}
+.line1 { display:block; color: var(--text); }
+.line2 { display:block; color: transparent; -webkit-text-stroke: 1.5px var(--accent); }
+
+.hero-sub {
+  font-size: clamp(15px, 2vw, 18px); color: var(--muted);
+  font-weight: 300; margin: 24px 0 40px; line-height: 1.7;
+  animation: fadeUp 0.6s 0.2s ease both;
+}
+.hero-sub strong { color: var(--text); font-weight: 500; }
+
+.hero-actions {
+  display: flex; gap: 14px; justify-content: center; flex-wrap: wrap;
+  animation: fadeUp 0.6s 0.3s ease both;
+}
+.btn-primary {
+  font-family: 'Space Mono', monospace; font-size: 13px;
+  padding: 13px 28px; background: var(--accent); color: var(--bg);
+  border: none; border-radius: 3px; text-decoration: none; font-weight: 700;
+  letter-spacing: 0.05em; transition: opacity 0.2s, transform 0.2s; cursor:pointer;
+}
+.btn-primary:hover { opacity: 0.85; transform: translateY(-1px); }
+.btn-ghost {
+  font-family: 'Space Mono', monospace; font-size: 13px;
+  padding: 12px 28px; background: transparent; color: var(--text);
+  border: 1px solid var(--border2); border-radius: 3px; text-decoration: none;
+  letter-spacing: 0.05em; transition: border-color 0.2s;
+}
+.btn-ghost:hover { border-color: var(--text); }
+
+.hero-install {
+  margin-top: 40px;
+  display: inline-flex; align-items: center; gap: 14px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 4px; padding: 13px 22px;
+  animation: fadeUp 0.6s 0.4s ease both;
+}
+.hero-install code { font-family: 'Space Mono', monospace; font-size: 14px; color: var(--accent); }
+.hero-install .ver { font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted2); border-left:1px solid var(--border); padding-left:14px; }
+
+/* SECTIONS */
+section { position: relative; z-index: 1; border-top: 1px solid var(--border); }
+.section-inner { max-width: 1020px; margin: 0 auto; padding: 88px 32px; }
+.section-label {
+  font-family: 'Space Mono', monospace; font-size: 10px;
+  color: var(--muted); letter-spacing: 0.2em; text-transform: uppercase;
+  display: flex; align-items: center; gap: 14px; margin-bottom: 36px;
+}
+.section-label::after { content:''; flex:1; height:1px; background: var(--border); }
+.section-title {
+  font-family: 'Syne', sans-serif;
+  font-size: clamp(28px, 4vw, 44px);
+  font-weight: 800; line-height: 1.1;
+  letter-spacing: -0.02em; margin-bottom: 16px;
+}
+.section-desc { font-size: 16px; color: var(--muted); max-width: 560px; line-height: 1.7; margin-bottom: 48px; }
+
+/* PROBLEM */
+.vs-grid { display:grid; grid-template-columns:1fr 1fr; gap:24px; }
+.vs-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 28px; overflow:hidden;
+}
+.vs-card.bad { border-top: 2px solid #ff4757; }
+.vs-card.good { border-top: 2px solid var(--accent); }
+.vs-card h3 { font-family:'Syne',sans-serif; font-weight:700; font-size:15px; margin-bottom:16px; }
+.vs-card pre {
+  font-family: 'Space Mono', monospace; font-size:12px;
+  line-height:1.9; white-space:pre-wrap; color: var(--muted);
+}
+.bad-t { color: #ff6b6b; }
+.good-t { color: var(--accent); }
+.dim-t { color: var(--muted2); }
+
+/* FEATURES */
+.feat-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:20px; }
+.feat-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 28px 24px; position:relative; overflow:hidden;
+  transition: transform 0.2s, border-color 0.2s;
+}
+.feat-card:hover { transform:translateY(-3px); border-color:var(--border2); }
+.feat-card::before { content:''; position:absolute; top:0;left:0;right:0;height:2px; }
+.feat-card:nth-child(1)::before,.feat-card:nth-child(4)::before { background:var(--accent); }
+.feat-card:nth-child(2)::before,.feat-card:nth-child(5)::before { background:var(--accent2); }
+.feat-card:nth-child(3)::before,.feat-card:nth-child(6)::before { background:var(--accent3); }
+.feat-icon { font-size:28px; margin-bottom:14px; display:block; }
+.feat-title { font-family:'Syne',sans-serif; font-weight:700; font-size:15px; margin-bottom:8px; }
+.feat-body { font-size:13px; color:var(--muted); line-height:1.65; }
+
+/* CODE TABS */
+.code-wrap {
+  background:#070c18; border:1px solid var(--border);
+  border-radius:8px; overflow:hidden;
+}
+.code-tabs { display:flex; background:var(--surface); border-bottom:1px solid var(--border); }
+.tab-btn {
+  font-family:'Space Mono',monospace; font-size:11px;
+  padding:12px 20px; color:var(--muted); cursor:pointer;
+  border:none; border-bottom:2px solid transparent;
+  background:none; letter-spacing:0.05em;
+  transition:color 0.2s, border-color 0.2s;
+}
+.tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
+.tab-pane { display:none; padding:28px 32px; }
+.tab-pane.active { display:block; }
+.tab-pane pre {
+  font-family:'Space Mono',monospace; font-size:13px;
+  line-height:1.9; overflow-x:auto; white-space:pre;
+}
+.kw{color:#7b61ff} .fn{color:#00f5c4} .st{color:#ff9d6c}
+.cm{color:#2d4060} .dec{color:#f7c948} .nm{color:#ff6b35}
+
+/* ARCH */
+.arch-wrap {
+  display:flex; background:var(--surface);
+  border:1px solid var(--border); border-radius:8px; overflow:hidden;
+}
+.arch-node {
+  flex:1; padding:32px 20px; text-align:center;
+  border-right:1px solid var(--border); position:relative;
+}
+.arch-node:last-child { border-right:none; }
+.arch-node::after {
+  content:'→'; position:absolute; right:-13px; top:50%;
+  transform:translateY(-50%); font-family:'Space Mono',monospace;
+  color:var(--accent); font-size:18px; z-index:2;
+}
+.arch-node:last-child::after { display:none; }
+.arch-icon { font-size:34px; margin-bottom:12px; display:block; }
+.arch-name { font-family:'Syne',sans-serif; font-weight:700; font-size:14px; margin-bottom:5px; }
+.arch-sub { font-family:'Space Mono',monospace; font-size:10px; color:var(--muted); }
+
+/* CONNECT */
+.connect-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:20px; }
+.connect-card {
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:6px; padding:28px 24px;
+}
+.connect-card h3 {
+  font-family:'Syne',sans-serif; font-weight:700; font-size:15px;
+  margin-bottom:14px; display:flex; align-items:center; gap:10px;
+}
+.connect-card pre {
+  font-family:'Space Mono',monospace; font-size:11px; color:var(--muted);
+  background:#070c18; border:1px solid var(--border); border-radius:4px;
+  padding:14px 16px; line-height:1.8; overflow-x:auto; white-space:pre-wrap;
+}
+
+/* STATS BAR */
+.stats-bar {
+  display:grid; grid-template-columns:repeat(4,1fr);
+  border:1px solid var(--border); border-radius:6px; overflow:hidden;
+}
+.stat-item {
+  padding:28px 24px; text-align:center;
+  border-right:1px solid var(--border);
+}
+.stat-item:last-child { border-right:none; }
+.stat-num {
+  font-family:'Syne',sans-serif; font-size:40px; font-weight:800;
+  color:var(--accent); line-height:1; margin-bottom:6px;
+}
+.stat-lbl { font-family:'Space Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:0.1em; }
+
+/* FOOTER */
+footer {
+  position:relative; z-index:1; border-top:1px solid var(--border);
+  padding:56px 32px; text-align:center;
+}
+.footer-logo { font-family:'Syne',sans-serif; font-weight:800; font-size:24px; margin-bottom:8px; }
+.footer-logo span { color:var(--accent); }
+.footer-tag { font-size:13px; color:var(--muted); margin-bottom:32px; }
+.footer-links { display:flex; gap:32px; justify-content:center; margin-bottom:28px; flex-wrap:wrap; }
+.footer-links a {
+  font-family:'Space Mono',monospace; font-size:11px;
+  color:var(--muted); text-decoration:none; letter-spacing:0.1em;
+  transition:color 0.2s;
+}
+.footer-links a:hover { color:var(--accent); }
+.footer-copy { font-family:'Space Mono',monospace; font-size:11px; color:var(--muted2); }
+
+/* REVEAL */
+.reveal { opacity:0; transform:translateY(24px); transition: opacity 0.6s ease, transform 0.6s ease; }
+.reveal.visible { opacity:1; transform:translateY(0); }
+
+@keyframes fadeUp { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:translateY(0)} }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+@media(max-width:768px){
+  nav { padding:0 20px; }
+  .nav-links { display:none; }
+  .vs-grid,.feat-grid,.connect-grid { grid-template-columns:1fr; }
+  .stats-bar { grid-template-columns:1fr 1fr; }
+  .arch-wrap { flex-direction:column; }
+  .arch-node { border-right:none; border-bottom:1px solid var(--border); }
+  .arch-node::after { content:'↓'; right:50%; bottom:-14px; top:auto; transform:translateX(50%); }
+}
+@media(max-width:480px){
+  .stats-bar { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-logo">Unified<span>Nexus</span></div>
+  <div class="nav-links">
+    <a href="#problem">Problem</a>
+    <a href="#features">Features</a>
+    <a href="#quickstart">Quick Start</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#connect">Connect</a>
+  </div>
+  <a class="nav-cta" href="https://github.com/rajboopathiking/UnifiedNexus" target="_blank">★ GitHub</a>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-glow"></div>
+  <div class="hero-inner">
+    <div class="hero-badge">
+      <span class="hero-badge-dot"></span>
+      Open Source · PyPI · Python 3.11+
+    </div>
+    <h1>
+      <span class="line1">Unified</span>
+      <span class="line2">Nexus</span>
+    </h1>
+    <p class="hero-sub">
+      One decorator. <strong>FastAPI REST</strong> and <strong>MCP for AI agents</strong> — simultaneously.
+      No drift. No duplication. One source of truth.
+    </p>
+    <div class="hero-actions">
+      <a class="btn-primary" href="#quickstart">Get Started →</a>
+      <a class="btn-ghost" href="https://github.com/rajboopathiking/UnifiedNexus" target="_blank">★ View on GitHub</a>
+    </div>
+    <div class="hero-install">
+      <code>pip install unified-nexus</code>
+      <span class="ver">v0.1.0 · MIT</span>
+    </div>
+  </div>
+</div>
+
+<!-- PROBLEM -->
+<section id="problem">
+  <div class="section-inner">
+    <div class="section-label reveal">The Problem</div>
+    <h2 class="section-title reveal">Stop writing the same logic twice.</h2>
+    <p class="section-desc reveal">Traditional stacks force you to define a FastAPI route, then manually re-wrap it as an MCP tool. Over time they drift apart — different validation, different behavior. Unified Nexus ends that permanently.</p>
+    <div class="vs-grid reveal">
+      <div class="vs-card bad">
+        <h3>❌ Traditional Stack</h3>
+        <pre><span class="dim-t"># Two files. Two definitions.</span>
+<span class="dim-t"># They will drift. Always.</span>
+
+<span class="bad-t">routes/user.py</span>        ← HTTP logic
+<span class="bad-t">mcp_tools/user.py</span>     ← MCP copy-paste
+<span class="dim-t">models/user.py</span>        ← maybe shared?
+
+<span class="bad-t"># Result: Code Drift. Silent bugs.</span>
+<span class="bad-t"># API validates X. Tool validates Y.</span></pre>
+      </div>
+      <div class="vs-card good">
+        <h3>✅ Unified Nexus</h3>
+        <pre><span class="dim-t"># One file. One decorator.</span>
+<span class="dim-t"># Always in sync. Guaranteed.</span>
+
+<span class="good-t">main.py</span>               ← REST + MCP
+<span class="good-t">@nexus.universal_tool</span> ← both at once
+<span class="dim-t">                      ← that's it.</span>
+
+<span class="good-t"># Result: One source of truth.</span>
+<span class="good-t"># HTTP and AI share exact same logic.</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section id="features">
+  <div class="section-inner">
+    <div class="section-label reveal">Why Unified Nexus</div>
+    <h2 class="section-title reveal">Everything you need.<br>Nothing you don't.</h2>
+    <div class="feat-grid">
+      <div class="feat-card reveal">
+        <span class="feat-icon">⚡</span>
+        <div class="feat-title">Single Source of Truth</div>
+        <div class="feat-body">Define logic once. HTTP and MCP interfaces share identical Pydantic validation, schemas, and business logic — forever in sync.</div>
+      </div>
+      <div class="feat-card reveal">
+        <span class="feat-icon">🤖</span>
+        <div class="feat-title">AI-Native by Default</div>
+        <div class="feat-body">Python docstrings become rich MCP tool descriptions. Field annotations guide Claude, Cursor, and other LLM hosts on how to call your tools correctly.</div>
+      </div>
+      <div class="feat-card reveal">
+        <span class="feat-icon">🔍</span>
+        <div class="feat-title">Auto-Method Detection</div>
+        <div class="feat-body">Intelligently selects GET or POST based on your function signature. Pydantic input → POST. Query params → GET. Zero config.</div>
+      </div>
+      <div class="feat-card reveal">
+        <span class="feat-icon">🛡️</span>
+        <div class="feat-title">Shared Middleware</div>
+        <div class="feat-body">Apply auth, rate limiting, or logging once. The same middleware protects both your HTTP API and MCP interface — no duplication ever.</div>
+      </div>
+      <div class="feat-card reveal">
+        <span class="feat-icon">💬</span>
+        <div class="feat-title">LLM-Optimized Errors</div>
+        <div class="feat-body">Python exceptions are converted to natural-language hints that help LLMs self-correct their tool calls instead of returning raw stack traces.</div>
+      </div>
+      <div class="feat-card reveal">
+        <span class="feat-icon">🔒</span>
+        <div class="feat-title">Lifespan-Safe MCP</div>
+        <div class="feat-body">Correctly composes FastAPI and FastMCP lifespans. The MCP task group is always initialized before requests arrive — no runtime surprises.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- STATS -->
+<section>
+  <div class="section-inner" style="padding-top:0">
+    <div class="stats-bar reveal">
+      <div class="stat-item"><div class="stat-num">1</div><div class="stat-lbl">port to run</div></div>
+      <div class="stat-item"><div class="stat-num">0</div><div class="stat-lbl">config files</div></div>
+      <div class="stat-item"><div class="stat-num">2</div><div class="stat-lbl">protocols served</div></div>
+      <div class="stat-item"><div class="stat-num">∞</div><div class="stat-lbl">AI integrations</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- QUICKSTART -->
+<section id="quickstart">
+  <div class="section-inner">
+    <div class="section-label reveal">Quick Start</div>
+    <h2 class="section-title reveal">Up and running in 60 seconds.</h2>
+    <p class="section-desc reveal">Install, define a tool, run. Your function is immediately available via both REST and MCP.</p>
+    <div class="code-wrap reveal">
+      <div class="code-tabs">
+        <button class="tab-btn active" onclick="showTab('install')">01 · Install</button>
+        <button class="tab-btn" onclick="showTab('define')">02 · Define</button>
+        <button class="tab-btn" onclick="showTab('run')">03 · Run</button>
+        <button class="tab-btn" onclick="showTab('advanced')">Advanced</button>
+      </div>
+      <div id="tab-install" class="tab-pane active">
+        <pre><span class="cm"># Install via pip</span>
+pip install unified-nexus
+
+<span class="cm"># Or clone from GitHub</span>
+git clone https://github.com/rajboopathiking/UnifiedNexus
+cd UnifiedNexus
+pip install -e .</pre>
+      </div>
+      <div id="tab-define" class="tab-pane">
+        <pre><span class="kw">from</span> unified_nexus <span class="kw">import</span> <span class="fn">UnifiedNexus</span>
+<span class="kw">from</span> pydantic <span class="kw">import</span> BaseModel, Field
+
+nexus = <span class="fn">UnifiedNexus</span>(<span class="st">"MyNexusAPI"</span>)
+
+<span class="kw">class</span> <span class="fn">UserRequest</span>(BaseModel):
+    user_id: int = <span class="fn">Field</span>(..., description=<span class="st">"The unique ID of the user"</span>)
+
+<span class="dec">@nexus.universal_tool</span>(path=<span class="st">"/user-info"</span>)
+<span class="kw">def</span> <span class="fn">get_user</span>(req: UserRequest):
+    <span class="st">"""
+    Fetches user status and clearance level.
+    This docstring is used by Swagger AND AI agents!
+    """</span>
+    <span class="kw">return</span> {<span class="st">"id"</span>: req.user_id, <span class="st">"status"</span>: <span class="st">"Active"</span>, <span class="st">"tier"</span>: <span class="st">"Gold"</span>}
+
+app = nexus.<span class="fn">finalize</span>()
+
+<span class="kw">if</span> __name__ == <span class="st">"__main__"</span>:
+    <span class="kw">import</span> uvicorn
+    uvicorn.<span class="fn">run</span>(app, host=<span class="st">"0.0.0.0"</span>, port=<span class="nm">8000</span>)</pre>
+      </div>
+      <div id="tab-run" class="tab-pane">
+        <pre><span class="cm"># Start the server</span>
+python main.py
+
+<span class="cm"># ✅ REST API Docs</span>
+<span class="fn">http://localhost:8000/docs</span>
+
+<span class="cm"># ✅ MCP Endpoint</span>
+<span class="fn">http://localhost:8000/mcp</span>
+
+<span class="cm"># ✅ Verify MCP with Inspector</span>
+npx -y @modelcontextprotocol/inspector http://localhost:8000/mcp</pre>
+      </div>
+      <div id="tab-advanced" class="tab-pane">
+        <pre><span class="cm"># Async tools work natively</span>
+<span class="dec">@nexus.universal_tool</span>(path=<span class="st">"/fetch"</span>)
+<span class="kw">async def</span> <span class="fn">fetch_data</span>(resource_id: str):
+    <span class="st">"""Fetches data asynchronously from external source."""</span>
+    <span class="kw">async with</span> httpx.<span class="fn">AsyncClient</span>() <span class="kw">as</span> client:
+        res = <span class="kw">await</span> client.<span class="fn">get</span>(<span class="st">f"https://api.example.com/{resource_id}"</span>)
+    <span class="kw">return</span> res.<span class="fn">json</span>()
+
+<span class="cm"># Custom path + explicit method</span>
+<span class="dec">@nexus.universal_tool</span>(path=<span class="st">"/search"</span>, methods=[<span class="st">"GET"</span>])
+<span class="kw">def</span> <span class="fn">search</span>(query: str, limit: int = <span class="nm">10</span>):
+    <span class="st">"""Search the catalog. Returns ranked results."""</span>
+    <span class="kw">return</span> {<span class="st">"results"</span>: [], <span class="st">"total"</span>: <span class="nm">0</span>}</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ARCHITECTURE -->
+<section id="architecture">
+  <div class="section-inner">
+    <div class="section-label reveal">Architecture</div>
+    <h2 class="section-title reveal">One app. Two protocols.</h2>
+    <p class="section-desc reveal">A single ASGI process serves both interfaces. FastMCP mounts cleanly inside FastAPI with correctly composed lifespans.</p>
+    <div class="arch-wrap reveal">
+      <div class="arch-node">
+        <span class="arch-icon">🧑‍💻</span>
+        <div class="arch-name">Your Code</div>
+        <div class="arch-sub">@universal_tool</div>
+      </div>
+      <div class="arch-node">
+        <span class="arch-icon">⚡</span>
+        <div class="arch-name">UnifiedNexus</div>
+        <div class="arch-sub">finalize()</div>
+      </div>
+      <div class="arch-node">
+        <span class="arch-icon">🌐</span>
+        <div class="arch-name">FastAPI</div>
+        <div class="arch-sub">/docs · REST</div>
+      </div>
+      <div class="arch-node">
+        <span class="arch-icon">🤖</span>
+        <div class="arch-name">FastMCP</div>
+        <div class="arch-sub">/mcp · SSE</div>
+      </div>
+      <div class="arch-node">
+        <span class="arch-icon">🚀</span>
+        <div class="arch-name">Uvicorn</div>
+        <div class="arch-sub">Single ASGI</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CONNECT -->
+<section id="connect">
+  <div class="section-inner">
+    <div class="section-label reveal">AI Integrations</div>
+    <h2 class="section-title reveal">Connect any AI agent in seconds.</h2>
+    <p class="section-desc reveal">Your MCP endpoint works with every major AI host out of the box — no extra config, no plugins.</p>
+    <div class="connect-grid">
+      <div class="connect-card reveal">
+        <h3>🟣 Claude Desktop</h3>
+        <pre>{
+  "mcpServers": {
+    "my-api": {
+      "url": "http://localhost:8000/mcp",
+      "transport": "streamable-http"
+    }
+  }
+}</pre>
+      </div>
+      <div class="connect-card reveal">
+        <h3>🔵 Cursor / VS Code</h3>
+        <pre># Add to MCP settings:
+
+Server URL:
+http://localhost:8000/mcp
+
+Transport:
+streamable-http
+
+# Your tools appear in
+# the AI sidebar instantly.</pre>
+      </div>
+      <div class="connect-card reveal">
+        <h3>🔍 MCP Inspector</h3>
+        <pre># Test & debug all tools:
+
+npx -y @modelcontextprotocol/inspector \
+  http://localhost:8000/mcp
+
+# Opens at localhost:6274
+# Full tool call UI included.</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-logo">Unified<span>Nexus</span></div>
+  <p class="footer-tag">One Decorator. Two Interfaces. Total Focus.</p>
+  <div class="footer-links">
+    <a href="https://github.com/rajboopathiking/UnifiedNexus" target="_blank">★ GitHub</a>
+    <a href="https://pypi.org/project/unified-nexus" target="_blank">📦 PyPI</a>
+    <a href="https://github.com/rajboopathiking/UnifiedNexus/issues" target="_blank">🐛 Issues</a>
+    <a href="https://github.com/rajboopathiking/UnifiedNexus/blob/main/CHANGELOG.md" target="_blank">📋 Changelog</a>
+    <a href="https://github.com/rajboopathiking/UnifiedNexus/blob/main/LICENSE" target="_blank">MIT License</a>
+  </div>
+  <p class="footer-copy">github.com/rajboopathiking/UnifiedNexus · Built for the AI-native backend era.</p>
+</footer>
+
+<script>
+  function showTab(name) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    event.target.classList.add('active');
+  }
+
+  // Scroll reveal
+  const observer = new IntersectionObserver(
+    entries => entries.forEach(e => { if(e.isIntersecting) e.target.classList.add('visible'); }),
+    { threshold: 0.1 }
+  );
+  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+</script>
+</body>
+</html>
