@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unified-nexus"
+version = "0.1.0"
+description = "A product-grade framework to unify FastAPI and FastMCP interfaces."
+readme = "README.md"
+authors = [
+    { name = "boopathiraj", email = "boopathiraj.aideveloper@gmail.com" }
+]
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.100.0",
+    "fastmcp>=0.1.0",
+    "pydantic>=2.0.0",
+    "uvicorn>=0.23.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "httpx>=0.25.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
