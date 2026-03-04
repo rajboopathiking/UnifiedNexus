@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
+
 import uvicorn
 from pydantic import BaseModel, Field
 from unified_nexus import UnifiedNexus
@@ -15,4 +19,4 @@ def check_user_status(payload: UserLookup):
 app = nexus.finalize()
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
