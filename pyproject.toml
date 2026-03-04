@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "unified-nexus"
-version = "0.1.0"
+version = "0.2.0"
 description = "One decorator. Two interfaces. Build FastAPI + MCP backends with a single source of truth."
 readme = "README.md"
 license = { text = "MIT" }
