@@ -210,19 +210,6 @@ nexus.include_router(user_router, prefix="/users", tags=["Users"])
 # ── 4. Finalize ─────────────────────────────────────────────
 app = nexus.finalize()
 ```
-How it works, step by step:
-
-Create a router — APIRouter() is just a mini-app that groups related routes together (like all /users endpoints).
-Attach routes to it — pass router=user_router to @nexus.universal_tool. This tells the framework "put this route on the router, not the main app."
-Register with a prefix — nexus.include_router(user_router, prefix="/users") mounts all those routes under /users, so your final URLs become:
-
-GET /users/ → get_users
-GET /users/{user_id} → get_user
-POST /users/ → create_user
-
-
-Call finalize() — this wires everything together (FastAPI + MCP).
-
 ## Requirements
 
 - Python 3.11+
