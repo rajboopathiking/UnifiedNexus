@@ -1,3 +1,5 @@
+# Unified Nexus
+
 **Unified Nexus** is a high-performance Python framework that bridges the gap between traditional REST APIs and the new world of LLM-native tools (MCP). Build product-grade backends where your web frontend and AI agents share the exact same logic, schemas, and execution paths — defined once.
 
 ---
