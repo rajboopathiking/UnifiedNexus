@@ -1,33 +1,36 @@
-# 🚀 Unified Nexus
-
-**One Decorator. Two Interfaces. Total Focus.**
-
-Unified Nexus is a high-performance Python framework designed to bridge the gap between traditional **REST APIs** and the new world of **LLM-native tools (MCP)**. It allows you to build product-grade backends where your web frontend and your AI agents share the exact same logic, schemas, and execution paths.
+**Unified Nexus** is a high-performance Python framework that bridges the gap between traditional REST APIs and the new world of LLM-native tools (MCP). Build product-grade backends where your web frontend and AI agents share the exact same logic, schemas, and execution paths — defined once.
 
 ---
 
-## ✨ Why Unified Nexus?
+## The Problem
 
-In traditional stacks, you often have to define a FastAPI route and then manually wrap it as an MCP tool. This leads to **Code Drift**, where the API and the Tool eventually go out of sync.
+In a traditional stack, you define a FastAPI route, then **manually re-wrap it** as an MCP tool. Over time, these two definitions drift apart — different validation, different schemas, different behavior. This is **Code Drift**, and it silently breaks your AI integrations.
 
-**Unified Nexus solves this by providing a Single Source of Truth:**
-* **Speed:** Define logic once; it's instantly available via HTTP and SSE.
-* **Consistency:** Shared Pydantic models ensure validation is identical for users and LLMs.
-* **AI-Native:** Automatically generates rich tool descriptions for Claude, Cursor, and other MCP hosts using your Python docstrings.
-
----
-
-## 🛠️ Quick Start
-
-### 1. Installation
-```bash
-pip install -r requirements.txt
+```
+❌ Traditional Stack
+├── routes/user.py       ← HTTP logic
+├── mcp_tools/user.py    ← Copy-pasted MCP logic (already out of sync)
+└── models/user.py       ← Shared? Maybe. Hopefully.
 ```
 
-### 2. Create your Unified App (main.py)
+```
+✅ Unified Nexus
+└── main.py              ← One function. One decorator. Both interfaces. Always in sync.
+```
 
-```Python
+---
 
+## Installation
+
+```bash
+pip install unified-nexus
+```
+
+---
+
+## Quick Start
+
+```python
 from unified_nexus import UnifiedNexus
 from pydantic import BaseModel, Field
 
@@ -40,7 +43,7 @@ class UserRequest(BaseModel):
 def get_user(req: UserRequest):
     """
     Fetches user status and clearance level.
-    This description is used by both Swagger and AI Agents!
+    This docstring is used by both Swagger UI and AI Agents automatically.
     """
     return {"id": req.user_id, "status": "Active", "tier": "Gold"}
 
@@ -49,25 +52,135 @@ app = nexus.finalize()
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
 ```
 
-### 3. Run and Verify
+Run it:
 
-**Start the server:**
-
-```Bash
+```bash
 python main.py
 ```
 
-### Web API Docs: http://localhost:8000/docs
+| Interface | URL |
+|-----------|-----|
+| REST API Docs (Swagger) | http://localhost:8000/docs |
+| MCP SSE Endpoint | http://localhost:8000/mcp |
+| MCP Inspector | `npx -y @modelcontextprotocol/inspector http://localhost:8000/mcp` |
 
-### MCP SSE Endpoint: http://localhost:8000/sse
+---
 
-### 🚀 Novel Features
+## Core Features
 
-1)  Auto-Method Detection: Intelligently chooses GET or POST based on your function signature.
+### Single Source of Truth
+Define your function once. Unified Nexus simultaneously registers it as a FastAPI route and an MCP tool. Validation, schemas, and business logic are identical for HTTP clients and AI agents — no drift, no duplication.
 
-2) Shared Middleware: Apply auth or logging once; it protects both the API and the MCP interface.
+### Auto-Method Detection
+Unified Nexus intelligently selects `GET` or `POST` based on your function signature. Functions with a Pydantic model input default to `POST`; pure query-based functions use `GET`. No configuration needed.
 
-**LLM-Optimized Errors:** Converts Python exceptions into natural language hints that help LLMs self-correct their tool calls.
+### AI-Native Tool Descriptions
+Your Python docstrings become rich, structured tool descriptions for MCP hosts like Claude, Cursor, and Copilot. Descriptive `Field(description=...)` annotations on your Pydantic models are passed directly to the LLM — helping it understand *how* to call your tools correctly.
+
+### Shared Middleware
+Apply authentication, rate limiting, or logging once at the `UnifiedNexus` level. The same middleware protects both your HTTP API and your MCP interface — no configuration duplication.
+
+### LLM-Optimized Errors
+When your tool raises a Python exception, Unified Nexus converts it into a structured natural-language hint that helps LLMs self-correct their tool calls — rather than returning a raw stack trace the model cannot act on.
+
+### Lifespan-Safe MCP Integration
+The `finalize()` method correctly composes FastAPI and FastMCP lifespans, ensuring the MCP `StreamableHTTPSessionManager` task group is always initialized before requests arrive. No runtime errors, no manual wiring.
+
+---
+
+## Architecture
+
+```
+Your Code (@universal_tool)
+        │
+        ▼
+  UnifiedNexus.finalize()
+     ┌──────┴──────┐
+     │             │
+  FastAPI        FastMCP
+  /docs           /mcp
+  REST           SSE/MCP
+     │             │
+     └──────┬──────┘
+            │
+      Single ASGI App
+      (Uvicorn / any ASGI server)
+```
+
+---
+
+## Advanced Usage
+
+### Custom Path and Methods
+
+```python
+@nexus.universal_tool(path="/search", methods=["GET"])
+def search_items(query: str, limit: int = 10):
+    """Search the item catalog. Returns a ranked list of results."""
+    return {"results": [...], "total": 42}
+```
+
+### Shared Auth Middleware
+
+```python
+from unified_nexus.middleware import BearerAuthMiddleware
+
+nexus = UnifiedNexus("SecureAPI")
+nexus.add_middleware(BearerAuthMiddleware, token="your-secret-token")
+```
+
+### Async Support
+
+```python
+@nexus.universal_tool(path="/fetch-data")
+async def fetch_external(resource_id: str):
+    """Fetches data from an external source asynchronously."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"https://api.example.com/{resource_id}")
+    return response.json()
+```
+
+---
+
+## Connecting AI Agents
+
+### Claude Desktop (`claude_desktop_config.json`)
+
+```json
+{
+  "mcpServers": {
+    "my-nexus-api": {
+      "url": "http://localhost:8000/mcp",
+      "transport": "streamable-http"
+    }
+  }
+}
+```
+
+### Cursor / VS Code
+
+Add `http://localhost:8000/mcp` as an MCP server in your editor's AI settings.
+
+### Verify with MCP Inspector
+
+```bash
+npx -y @modelcontextprotocol/inspector http://localhost:8000/mcp
+```
+
+---
+
+## Requirements
+
+- Python 3.11+
+- FastAPI
+- FastMCP
+- Uvicorn
+- Pydantic v2
+
+---
+
+## Contributing
+
+Contributions are welcome! Please open an issue to discuss proposed changes before submitting a PR.
