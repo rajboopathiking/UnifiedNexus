@@ -33,7 +33,7 @@ pip install unified-nexus
 ## Quick Start
 
 ```python
-from unified_nexus import UnifiedNexus
+from UnifiedNexus.unified_nexus import UnifiedNexus
 from pydantic import BaseModel, Field
 
 nexus = UnifiedNexus("MyNexusAPI")
