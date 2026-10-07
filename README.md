@@ -25,7 +25,7 @@ In a traditional stack, you define a FastAPI route, then **manually re-wrap it**
 ## Installation
 
 ```bash
-pip install unified-nexus
+git clone <git rep>
 ```
 
 ---
