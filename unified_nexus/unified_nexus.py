@@ -403,6 +403,8 @@ class UnifiedNexus:
                 acquired_idempotency = True
 
             # 7. Execute tool with concurrency limiting and timeout
+            execution_started = False
+            execution_succeeded = False
             try:
                 async with self._concurrency_semaphore:
                     if inspect.iscoroutinefunction(func):
@@ -411,7 +413,9 @@ class UnifiedNexus:
                         exec_coro = run_in_threadpool(func, *args, **kwargs)
 
                     try:
+                        execution_started = True
                         raw_result = await asyncio.wait_for(exec_coro, timeout=effective_timeout)
+                        execution_succeeded = True
                     except (TimeoutError, asyncio.TimeoutError):
                         if not inspect.iscoroutinefunction(func):
                             logger.warning(
@@ -456,22 +460,23 @@ class UnifiedNexus:
                 final_res = await self.plugins.trigger_after_execute(ctx, bounded_res)
                 return final_res
 
-            except Exception as e:
-                # If tool failed with timeout on a side-effecting operation (ACTION or DESTRUCTIVE),
-                # do NOT release the reservation immediately. Releasing immediately invites a concurrent
-                # retry storm while the background worker thread may still be running.
-                is_timeout = isinstance(e, (TimeoutError, asyncio.TimeoutError, ToolTimeoutError))
+            except Exception:
+                # Storage/plugin errors after success must not make the action executable again.
+                # A side-effecting tool may also mutate state before raising any exception;
+                # treat its outcome as uncertain once execution has started.
                 is_side_effecting = tool_type in (ToolSafetyLevel.ACTION, ToolSafetyLevel.DESTRUCTIVE)
+                retain_reservation = execution_succeeded or (execution_started and is_side_effecting)
 
-                if acquired_idempotency and cache_key and not (is_timeout and is_side_effecting):
+                if acquired_idempotency and cache_key and not retain_reservation:
                     try:
                         await self._idempotency_cache.release(cache_key, owner_token=owner_token)
                     except Exception:
                         pass
-                elif acquired_idempotency and cache_key and is_timeout and is_side_effecting:
+                elif acquired_idempotency and cache_key and retain_reservation:
                     logger.warning(
-                        f"[{ctx.request_id}] Side-effecting tool '{tool_name}' timed out. Retaining idempotency "
-                        f"lock for key '{cache_key}' to prevent duplicate concurrent execution during recovery."
+                        f"[{ctx.request_id}] Tool '{tool_name}' failed after execution started or succeeded. "
+                        f"Retaining idempotency reservation for key '{cache_key}'; reconcile side effects "
+                        f"before retrying after the reservation expires."
                     )
                 raise
 

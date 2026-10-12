@@ -120,9 +120,10 @@ To prevent delimiter injection vulnerabilities:
 - `compute_caller_identity` percent-encodes tenant and user identifiers (`urllib.parse.quote(..., safe="")`).
 - Tenant and user strings containing colons or structural delimiters (such as `:user:`) are encoded into distinct, non-overlapping representations, ensuring multi-tenant isolation is independent of input format.
 
-### J. Side-Effect Timeout Recovery & Durable Idempotency Keys
-When a state-modifying tool (`ToolSafetyLevel.ACTION` or `DESTRUCTIVE`) encounters a timeout:
-- **Lock Retention**: UnifiedNexus retains the idempotency lock in the cache rather than releasing it immediately. This blocks concurrent agent retry storms from executing duplicate actions while background tasks complete or wind down.
+### J. Side-Effect Failure Recovery & Durable Idempotency Keys
+When a state-modifying tool (`ToolSafetyLevel.ACTION` or `DESTRUCTIVE`) raises after execution starts, its outcome may be uncertain:
+- **Reservation Retention**: UnifiedNexus retains the reservation instead of releasing it. This also applies when a tool succeeds but saving its result or processing its response fails. A retry receives the cached result if persistence succeeded, or waits while the reservation remains pending. Read-only tools that fail during execution can retry normally.
+- **Recovery Window**: Reservations retain their existing expiry; this is bounded retry protection, not a durable transaction. Reconcile uncertain actions before retrying after expiry. Use an application plugin and a downstream idempotency key or database unique constraint for durable deduplication across expiration, process crashes, and Redis outages.
 - **Durable Business-Layer Idempotency**: `NexusContext` exposes `ctx.idempotency_key` and qualified `ctx.durable_idempotency_key` (`f"{caller_id}:{tool_name}:{idempotency_key}"`). Critical services should forward this durable key directly to transactional downstream APIs (e.g. Stripe, database ledger inserts) to achieve true end-to-end exactly-once execution.
 
 ---

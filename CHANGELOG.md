@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.2] - 2026-10-13
+
+### Fixed
+- **Post-Execution Failure Idempotency Reservation Retention**: Preserve idempotency reservations after successful tool execution when result storage (`complete()`) or response processing fails, preventing duplicate execution on automated retries.
+- **Uncertain Side-Effect State Protection**: Retain reservations for state-modifying actions (`ToolSafetyLevel.ACTION` or `DESTRUCTIVE`) whose outcome is uncertain after execution starts, while cleanly releasing read-only tools so non-mutating failures remain retryable.
+- **Comprehensive Failure Regressions**: Added REST and MCP test matrix verifying result-storage failures before and after persistence, cross-worker retry blocking, and exceptions raised after side effects.
+
 ## [0.2.1] - 2026-10-13
 
 ### Fixed & Hardened (Production-Ready Release)
