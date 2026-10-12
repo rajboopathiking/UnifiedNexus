@@ -23,6 +23,7 @@ from unified_nexus.security import (
     BaseIdempotencyBackend,
     IdempotencyCache,
     RedisIdempotencyBackend,
+    compute_caller_identity,
 )
 from unified_nexus.unified_nexus import (
     ExposureMode,
@@ -52,6 +53,7 @@ __all__ = [
     "ToolTimeoutError",
     "UnifiedNexus",
     "UnifiedNexusError",
+    "compute_caller_identity",
     "normalize_exposure",
     "__version__",
 ]

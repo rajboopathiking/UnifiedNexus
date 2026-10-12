@@ -344,18 +344,51 @@ class MockAsyncRedis:
     async def get(self, key: str):
         return self.store.get(key)
 
-    async def set(self, key: str, value: str, nx: bool = False, ex: int | None = None):
+    async def set(self, key: str, value: str, nx: bool = False, ex: int | None = None, px: int | None = None):
         if nx and key in self.store:
             return False
         self.store[key] = value
         if ex:
             self.expirations[key] = ex
+        elif px:
+            self.expirations[key] = px / 1000.0
         return True
 
     async def delete(self, key: str):
         if key in self.store:
             del self.store[key]
             return 1
+        return 0
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args):
+        import json
+
+        keys = keys_and_args[:numkeys]
+        args = keys_and_args[numkeys:]
+        full_key = keys[0]
+        raw = self.store.get(full_key)
+        if not raw:
+            return 0
+        try:
+            rec = json.loads(raw)
+        except Exception:
+            return 0
+        expected_owner = args[0] if args else ""
+        if "DEL" in script:
+            if rec.get("status") == "PENDING":
+                if not expected_owner or rec.get("owner_token") == expected_owner:
+                    del self.store[full_key]
+                    return 1
+            return 0
+        elif "SET" in script:
+            if rec.get("status") == "PENDING":
+                if not expected_owner or rec.get("owner_token") == expected_owner:
+                    completed_payload = args[1]
+                    ttl = int(args[2])
+                    self.store[full_key] = completed_payload
+                    self.expirations[full_key] = ttl
+                    return 1
+            return 0
         return 0
 
     async def aclose(self):

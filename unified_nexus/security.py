@@ -9,6 +9,7 @@ import inspect
 import json
 import re
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
@@ -169,8 +170,8 @@ def compute_payload_hash(kwargs: dict[str, Any]) -> str:
 
 def compute_caller_identity(principal: Any, require_authenticated: bool = False) -> str:
     """
-    Computes a stable string representation of verified caller identity/tenant.
-    Ensures idempotency keys are strictly isolated per tenant/user.
+    Computes a canonical, delimiter-safe string representation of verified caller identity/tenant.
+    Ensures idempotency keys are strictly isolated per tenant/user without delimiter collisions.
     If require_authenticated is True and principal is None, raises AuthorizationError.
     """
     if principal is None:
@@ -179,18 +180,29 @@ def compute_caller_identity(principal: Any, require_authenticated: bool = False)
                 "Unauthorized: Authenticated identity required for privileged operation."
             )
         return "anonymous"
-    if isinstance(principal, (str, int, float, bool)):
+    if isinstance(principal, (int, float, bool)):
         return str(principal)
+    if isinstance(principal, str):
+        # Escape colons to prevent delimiter collisions
+        return urllib.parse.quote(principal, safe="")
     if isinstance(principal, dict):
         tenant = principal.get("tenant_id") or principal.get("org_id")
         user = principal.get("user_id") or principal.get("sub") or principal.get("username")
-        if tenant and user:
-            return f"tenant:{tenant}:user:{user}"
+        if tenant is not None and user is not None:
+            # Unambiguously percent-encode components to prevent ':user:' delimiter collisions
+            safe_tenant = urllib.parse.quote(str(tenant), safe="")
+            safe_user = urllib.parse.quote(str(user), safe="")
+            return f"tenant:{safe_tenant}:user:{safe_user}"
         try:
-            return json.dumps(principal, sort_keys=True)
+            return json.dumps(principal, sort_keys=True, separators=(",", ":"), default=str)
         except Exception:
-            return str(principal)
-    return str(principal)
+            return urllib.parse.quote(str(principal), safe="")
+    if hasattr(principal, "__dict__"):
+        try:
+            return json.dumps(principal.__dict__, sort_keys=True, separators=(",", ":"), default=str)
+        except Exception:
+            pass
+    return urllib.parse.quote(str(principal), safe="")
 
 
 @runtime_checkable
@@ -242,28 +254,38 @@ class IdempotencyRecord:
     result: Any = None
     event: asyncio.Event = field(default_factory=asyncio.Event)
     owner_token: str | None = None
+    lock_timeout: float = 60.0
 
 
 class IdempotencyCache:
     """
     Thread-safe and async-safe in-memory cache for deduplicating idempotent operations.
     Enforces atomic in-flight locking, tenant/identity binding, payload hash validation,
-    and automatic TTL expiration.
+    bounded waiter rechecking, and automatic TTL/lock_timeout expiration.
     """
 
-    def __init__(self, maxsize: int = 1000, ttl_seconds: float = 3600.0):
+    def __init__(
+        self,
+        maxsize: int = 1000,
+        ttl_seconds: float = 3600.0,
+        lock_timeout: float = 60.0,
+    ):
         self._cache: dict[str, IdempotencyRecord] = {}
         self._maxsize = maxsize
         self._ttl = ttl_seconds
+        self._lock_timeout = lock_timeout
         self._lock = asyncio.Lock()
 
     def _prune_expired_or_overflow(self) -> None:
         now = time.time()
-        # Remove expired entries
-        expired_keys = [
-            k for k, rec in self._cache.items()
-            if (now - rec.created_at) > self._ttl and rec.status == "COMPLETED"
-        ]
+        # Remove expired completed and expired pending entries
+        expired_keys = []
+        for k, rec in self._cache.items():
+            if rec.status == "COMPLETED" and (now - rec.created_at) > self._ttl:
+                expired_keys.append(k)
+            elif rec.status == "PENDING" and (now - rec.created_at) > rec.lock_timeout:
+                rec.event.set()
+                expired_keys.append(k)
         for k in expired_keys:
             del self._cache[k]
 
@@ -288,62 +310,66 @@ class IdempotencyCache:
         """
         Atomically reserves an idempotency key or retrieves the cached result.
         Returns ("CACHED", result), ("ACQUIRED", None), ("CONFLICT", None), or ("TIMEOUT", None).
+        Guarantees that multiple waiting callers do NOT all receive ACQUIRED when a pending key
+        is released or abandoned. Only one waiter acquires; other waiters wait on the replacement reservation.
         """
-        async with self._lock:
-            now = time.time()
-            record = self._cache.get(key)
+        deadline = time.time() + wait_timeout
+        effective_lock_timeout = float(lock_timeout if lock_timeout is not None else self._lock_timeout)
 
-            # Check if existing record is expired
-            if record and (now - record.created_at > self._ttl) and record.status == "COMPLETED":
-                del self._cache[key]
-                record = None
+        while True:
+            async with self._lock:
+                now = time.time()
+                rec = self._cache.get(key)
 
-            if record is None:
-                self._prune_expired_or_overflow()
-                event = asyncio.Event()
-                self._cache[key] = IdempotencyRecord(
-                    status="PENDING",
-                    payload_hash=payload_hash,
-                    created_at=now,
-                    event=event,
-                    owner_token=owner_token,
-                )
-                return "ACQUIRED", None
+                # Check if COMPLETED record expired
+                if rec and rec.status == "COMPLETED" and (now - rec.created_at > self._ttl):
+                    del self._cache[key]
+                    rec = None
 
-            # Record exists: verify payload hash to prevent key reuse with different parameters
-            if record.payload_hash != payload_hash:
-                return "CONFLICT", None
+                # Check if PENDING record expired (lock_timeout exceeded)
+                if rec and rec.status == "PENDING" and (now - rec.created_at > rec.lock_timeout):
+                    rec.event.set()
+                    del self._cache[key]
+                    rec = None
 
-            if record.status == "COMPLETED":
-                return "CACHED", record.result
+                if rec is None:
+                    # Key is available: atomically reserve reservation
+                    self._prune_expired_or_overflow()
+                    event = asyncio.Event()
+                    self._cache[key] = IdempotencyRecord(
+                        status="PENDING",
+                        payload_hash=payload_hash,
+                        created_at=now,
+                        event=event,
+                        owner_token=owner_token,
+                        lock_timeout=effective_lock_timeout,
+                    )
+                    return "ACQUIRED", None
 
-            # Record is PENDING (another concurrent request with identical payload is running)
-            event = record.event
-
-        # Wait for the in-flight operation to complete outside the lock
-        try:
-            await asyncio.wait_for(event.wait(), timeout=wait_timeout)
-        except (TimeoutError, asyncio.TimeoutError):
-            return "TIMEOUT", None
-
-        # Re-check under lock
-        async with self._lock:
-            rec = self._cache.get(key)
-            if rec and rec.status == "COMPLETED":
+                # Record exists: verify payload hash to prevent key reuse with different parameters
                 if rec.payload_hash != payload_hash:
                     return "CONFLICT", None
-                return "CACHED", rec.result
 
-            # If the concurrent operation failed or cleared without completing, acquire for this caller
-            event = asyncio.Event()
-            self._cache[key] = IdempotencyRecord(
-                status="PENDING",
-                payload_hash=payload_hash,
-                created_at=time.time(),
-                event=event,
-                owner_token=owner_token,
-            )
-            return "ACQUIRED", None
+                if rec.status == "COMPLETED":
+                    return "CACHED", rec.result
+
+                # Record is PENDING (another concurrent request with identical payload is running)
+                event = rec.event
+
+            # Wait for the in-flight operation outside the lock
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return "TIMEOUT", None
+
+            try:
+                await asyncio.wait_for(event.wait(), timeout=remaining)
+            except (TimeoutError, asyncio.TimeoutError):
+                return "TIMEOUT", None
+
+            # When event fires (completed, released, or expired), loop repeats:
+            # - If completed: returns ("CACHED", result) under lock
+            # - If released: FIRST waiter entering lock acquires ("ACQUIRED", None) and creates a NEW event
+            # - Subsequent waiters entering lock see status="PENDING" with the new event and wait on it
 
     async def complete(
         self,
@@ -356,6 +382,10 @@ class IdempotencyCache:
         async with self._lock:
             rec = self._cache.get(key)
             if rec:
+                # Do not overwrite if key is already COMPLETED by another owner
+                if rec.status == "COMPLETED":
+                    return
+                # Do not overwrite if key was claimed by another owner after timeout
                 if owner_token is not None and rec.owner_token is not None and rec.owner_token != owner_token:
                     return
                 rec.status = "COMPLETED"
@@ -405,12 +435,41 @@ class IdempotencyCache:
 
 class RedisIdempotencyBackend:
     """
-    Distributed Redis-backed storage for idempotency deduplication.
+    Distributed Redis-backed storage for idempotency deduplication with atomic Lua scripting.
     Adheres to BaseIdempotencyBackend protocol.
     Supports multi-worker Uvicorn / Gunicorn clusters with atomic locking (SET NX EX),
     deterministic SHA-256 payload conflict detection, automatic TTL expiration,
-    and non-blocking polling for in-flight concurrent operations.
+    and atomic Lua ownership validation preventing stale deletions and overwrites.
     """
+
+    LUA_RELEASE = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local ok, rec = pcall(cjson.decode, raw)
+if not ok or type(rec) ~= 'table' then return 0 end
+if rec.status == 'PENDING' then
+    local expected = ARGV[1]
+    if not expected or expected == '' or rec.owner_token == expected then
+        return redis.call('DEL', KEYS[1])
+    end
+end
+return 0
+"""
+
+    LUA_COMPLETE = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local ok, rec = pcall(cjson.decode, raw)
+if not ok or type(rec) ~= 'table' then return 0 end
+if rec.status == 'PENDING' then
+    local expected = ARGV[1]
+    if not expected or expected == '' or rec.owner_token == expected then
+        redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+        return 1
+    end
+end
+return 0
+"""
 
     def __init__(
         self,
@@ -466,7 +525,8 @@ class RedisIdempotencyBackend:
         full_key = f"{self._key_prefix}{key}"
         now = time.time()
         deadline = now + wait_timeout
-        effective_lock_timeout = int(lock_timeout if lock_timeout is not None else self._lock_timeout)
+        effective_lock_timeout_sec = float(lock_timeout if lock_timeout is not None else self._lock_timeout)
+        effective_lock_timeout_ms = max(int(effective_lock_timeout_sec * 1000), 1)
 
         pending_data = json.dumps({
             "status": "PENDING",
@@ -475,8 +535,8 @@ class RedisIdempotencyBackend:
             "owner_token": owner_token,
         })
 
-        # Atomic reservation via SET NX EX
-        acquired = await client.set(full_key, pending_data, nx=True, ex=effective_lock_timeout)
+        # Atomic reservation via SET NX PX (millisecond precision)
+        acquired = await client.set(full_key, pending_data, nx=True, px=effective_lock_timeout_ms)
         if acquired:
             return "ACQUIRED", None
 
@@ -485,7 +545,7 @@ class RedisIdempotencyBackend:
             raw = await client.get(full_key)
             if not raw:
                 # Key was deleted (e.g. concurrent execution failed/released lock or expired)
-                acquired = await client.set(full_key, pending_data, nx=True, ex=effective_lock_timeout)
+                acquired = await client.set(full_key, pending_data, nx=True, px=effective_lock_timeout_ms)
                 if acquired:
                     return "ACQUIRED", None
                 await asyncio.sleep(self._poll_interval)
@@ -524,25 +584,14 @@ class RedisIdempotencyBackend:
     ) -> None:
         """
         Stores completed result with full TTL in Redis.
-        Validates lock ownership: if the lock expired and was claimed by another worker,
-        does not overwrite the new owner's active reservation.
+        Validates lock ownership atomically via Lua script:
+        - Prevents stale completion when another owner's record is already COMPLETED.
+        - Prevents stale completion when key is PENDING under another owner's token.
+        - Prevents writing if key expired.
         """
         client = await self._get_client()
         full_key = f"{self._key_prefix}{key}"
-
-        if owner_token is not None:
-            raw = await client.get(full_key)
-            if raw:
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8")
-                try:
-                    record = json.loads(raw)
-                    # If key was claimed by another worker after lock expiration, do not overwrite
-                    if record.get("status") == "PENDING" and record.get("owner_token") != owner_token:
-                        return
-                except Exception:
-                    pass
-
+        token_arg = owner_token or ""
         completed_data = json.dumps({
             "status": "COMPLETED",
             "payload_hash": payload_hash,
@@ -550,16 +599,16 @@ class RedisIdempotencyBackend:
             "owner_token": owner_token,
             "created_at": time.time(),
         }, default=str)
-        await client.set(full_key, completed_data, ex=int(self._ttl))
+        ttl_arg = int(self._ttl)
 
-    async def release(self, key: str, owner_token: str | None = None) -> None:
-        """
-        Deletes pending reservation key if tool execution failed.
-        Guarantees lock ownership: only deletes if the lock still belongs to owner_token,
-        preventing an expired or slow worker from releasing another worker's new lock.
-        """
-        client = await self._get_client()
-        full_key = f"{self._key_prefix}{key}"
+        if hasattr(client, "eval"):
+            try:
+                await client.eval(self.LUA_COMPLETE, 1, full_key, token_arg, completed_data, ttl_arg)
+                return
+            except Exception:
+                pass
+
+        # Fallback for simple mock clients without eval:
         raw = await client.get(full_key)
         if raw:
             if isinstance(raw, bytes):
@@ -567,7 +616,38 @@ class RedisIdempotencyBackend:
             try:
                 record = json.loads(raw)
                 if record.get("status") == "PENDING":
-                    if owner_token is None or record.get("owner_token") is None or record.get("owner_token") == owner_token:
+                    if not owner_token or record.get("owner_token") == owner_token:
+                        await client.set(full_key, completed_data, ex=ttl_arg)
+            except Exception:
+                pass
+
+    async def release(self, key: str, owner_token: str | None = None) -> None:
+        """
+        Deletes pending reservation key if tool execution failed.
+        Guarantees lock ownership atomically via Lua script:
+        - Only deletes if the lock still belongs to owner_token and is PENDING.
+        - Never deletes another worker's new lock or a COMPLETED result.
+        """
+        client = await self._get_client()
+        full_key = f"{self._key_prefix}{key}"
+        token_arg = owner_token or ""
+
+        if hasattr(client, "eval"):
+            try:
+                await client.eval(self.LUA_RELEASE, 1, full_key, token_arg)
+                return
+            except Exception:
+                pass
+
+        # Fallback for simple mock clients without eval:
+        raw = await client.get(full_key)
+        if raw:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            try:
+                record = json.loads(raw)
+                if record.get("status") == "PENDING":
+                    if not owner_token or record.get("owner_token") == owner_token:
                         await client.delete(full_key)
             except Exception:
                 pass

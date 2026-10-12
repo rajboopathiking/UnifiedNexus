@@ -99,14 +99,27 @@ For tools declared with `roles`, `scopes`, `requires_approval`, or classified as
 - UnifiedNexus strictly **rejects** unauthenticated callers (`ctx.principal is None`) with `AuthorizationError`.
 - Privileged operations never fall back to the shared `"anonymous"` cache partition, completely preventing cross-tenant and unauthenticated idempotency key hijacking.
 
-### G. Lock Ownership Tokens & Crash Recovery
-In distributed Redis environments, if a worker crashes or an operation outlasts its initial lock TTL, another worker may legitimately acquire the key.
-To prevent the initial worker from corrupting state upon late completion or error:
+### G. Atomic Redis Ownership & Lua Scripting
+In distributed Redis environments, if a worker crashes or an operation outlasts its lock TTL, another worker may legitimately acquire the key.
+To prevent stale workers from corrupting state upon late completion or error:
 - Each reservation generates a cryptographic `owner_token`.
-- `complete()` and `release()` in `RedisIdempotencyBackend` strictly validate that the active record still matches the `owner_token`.
-- Expired or stale workers cannot delete a new worker's lock or overwrite its pending reservation.
+- `complete()` and `release()` in `RedisIdempotencyBackend` execute atomic Lua scripts (`LUA_COMPLETE`, `LUA_RELEASE`) directly on Redis.
+- Ownership checks and state transitions occur in a single atomic server step:
+  - Stale workers can never delete another worker's new reservation.
+  - Stale workers can never overwrite a record that was already `COMPLETED`.
+  - Millisecond precision is enforced via Redis `SET NX PX`.
 
-### H. Side-Effect Timeout Recovery & Durable Idempotency Keys
+### H. In-Memory Waiter Deduplication & Pending Lock Expiry
+For single-worker deployments utilizing `IdempotencyCache`:
+- **Replacement Waiter Loop**: When an in-flight operation fails or is released, exactly ONE waiting caller acquires the replacement reservation (`ACQUIRED`), while all other waiting callers wait on the new reservation and receive `CACHED` upon completion, eliminating duplicate concurrent executions.
+- **Pending Lock Expiration**: `PENDING` records enforce `lock_timeout`. If a worker crashes or abandons an in-flight operation, the reservation automatically expires and is evicted, unblocking subsequent callers without manual intervention.
+
+### I. Unambiguous Identity Encoding & Collision Prevention
+To prevent delimiter injection vulnerabilities:
+- `compute_caller_identity` percent-encodes tenant and user identifiers (`urllib.parse.quote(..., safe="")`).
+- Tenant and user strings containing colons or structural delimiters (such as `:user:`) are encoded into distinct, non-overlapping representations, ensuring multi-tenant isolation is independent of input format.
+
+### J. Side-Effect Timeout Recovery & Durable Idempotency Keys
 When a state-modifying tool (`ToolSafetyLevel.ACTION` or `DESTRUCTIVE`) encounters a timeout:
 - **Lock Retention**: UnifiedNexus retains the idempotency lock in the cache rather than releasing it immediately. This blocks concurrent agent retry storms from executing duplicate actions while background tasks complete or wind down.
 - **Durable Business-Layer Idempotency**: `NexusContext` exposes `ctx.idempotency_key` and qualified `ctx.durable_idempotency_key` (`f"{caller_id}:{tool_name}:{idempotency_key}"`). Critical services should forward this durable key directly to transactional downstream APIs (e.g. Stripe, database ledger inserts) to achieve true end-to-end exactly-once execution.

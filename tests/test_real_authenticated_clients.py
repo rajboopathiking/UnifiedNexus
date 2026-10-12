@@ -19,12 +19,14 @@ from fastmcp.server.auth import AccessToken, TokenVerifier
 from tests.test_idempotency_and_identity_hardening import MockAsyncRedis, extract_result
 from unified_nexus import (
     ExposureMode,
+    IdempotencyCache,
     NexusContext,
     NexusPlugin,
     RedisIdempotencyBackend,
     ToolSafetyLevel,
     ToolTimeoutError,
     UnifiedNexus,
+    compute_caller_identity,
 )
 
 
@@ -274,3 +276,151 @@ def test_durable_idempotency_key_propagation_in_context():
         idempotency_key="tx_9988",
     )
     assert ctx.durable_idempotency_key == "tenant:tenant_9:user:usr_42:process_payment:tx_9988"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. IN-MEMORY CONCURRENCY, REPLACEMENT WAITING & PENDING EXPIRATION
+# ─────────────────────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_in_memory_waiters_do_not_duplicate_acquire_on_release():
+    """
+    Verifies that when a pending reservation is released by an initial caller,
+    waiting callers do NOT all receive ACQUIRED. Exactly ONE replacement waiter
+    receives ACQUIRED, while the other waiters wait on the new reservation and
+    receive CACHED once it completes.
+    """
+    cache = IdempotencyCache(ttl_seconds=300.0, lock_timeout=10.0)
+
+    # Initial caller acquires key
+    st1, _ = await cache.acquire_or_get("key_race", "hash_same", owner_token="caller_1")
+    assert st1 == "ACQUIRED"
+
+    results = []
+
+    async def waiter(caller_id: str):
+        st, val = await cache.acquire_or_get("key_race", "hash_same", wait_timeout=2.0, owner_token=caller_id)
+        results.append((caller_id, st, val))
+        if st == "ACQUIRED":
+            # Simulate work and complete
+            await asyncio.sleep(0.05)
+            await cache.complete("key_race", "hash_same", {"winner": caller_id}, owner_token=caller_id)
+
+    # Launch 4 concurrent waiters awaiting caller_1's in-flight operation
+    waiter_tasks = [
+        asyncio.create_task(waiter(f"waiter_{i}"))
+        for i in range(2, 6)
+    ]
+
+    # Give tasks a moment to enter wait
+    await asyncio.sleep(0.05)
+
+    # Caller 1 fails / releases key
+    await cache.release("key_race", owner_token="caller_1")
+
+    # Await all waiters to finish
+    await asyncio.gather(*waiter_tasks)
+
+    # Exactly ONE waiter must have received ACQUIRED, and all others must have received CACHED!
+    acquired = [r for r in results if r[1] == "ACQUIRED"]
+    cached = [r for r in results if r[1] == "CACHED"]
+
+    assert len(acquired) == 1, f"Expected exactly 1 ACQUIRED, got {len(acquired)}: {acquired}"
+    assert len(cached) == 3, f"Expected 3 CACHED, got {len(cached)}: {cached}"
+
+    winner_id = acquired[0][0]
+    for c in cached:
+        assert c[2] == {"winner": winner_id}
+
+
+@pytest.mark.asyncio
+async def test_in_memory_pending_record_expires_after_lock_timeout():
+    """
+    Verifies that an abandoned PENDING in-memory reservation expires once lock_timeout
+    is exceeded, allowing subsequent callers to acquire the key rather than blocking forever.
+    """
+    cache = IdempotencyCache(ttl_seconds=300.0, lock_timeout=0.05)
+
+    # Caller 1 acquires key with 50ms lock_timeout and abandons execution
+    st1, _ = await cache.acquire_or_get("key_abandoned", "hash_1", owner_token="caller_crashed", lock_timeout=0.05)
+    assert st1 == "ACQUIRED"
+
+    # Sleep past the lock timeout
+    await asyncio.sleep(0.08)
+
+    # Caller 2 attempts to acquire the abandoned key
+    st2, val2 = await cache.acquire_or_get("key_abandoned", "hash_1", wait_timeout=1.0, owner_token="caller_recovered")
+    assert st2 == "ACQUIRED"
+    assert val2 is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. IDENTITY ENCODING DELIMITER COLLISION PREVENTION
+# ─────────────────────────────────────────────────────────────────────────────
+def test_identity_encoding_disambiguates_tenant_user_with_delimiters():
+    """
+    Verifies that different tenant/user pairs containing ':user:' produce strictly
+    distinct caller identity strings and isolated idempotency partitions.
+    """
+    # Tenant containing delimiter injection
+    principal_1 = {"tenant_id": "corp:user:alice", "user_id": "42"}
+    # Innocent tenant with injected user string
+    principal_2 = {"tenant_id": "corp", "user_id": "alice:user:42"}
+
+    id1 = compute_caller_identity(principal_1)
+    id2 = compute_caller_identity(principal_2)
+
+    assert id1 != id2
+    assert id1 == "tenant:corp%3Auser%3Aalice:user:42"
+    assert id2 == "tenant:corp:user:alice%3Auser%3A42"
+
+    ctx1 = NexusContext(transport="rest", tool_name="charge", principal=principal_1, idempotency_key="tx_1")
+    ctx2 = NexusContext(transport="rest", tool_name="charge", principal=principal_2, idempotency_key="tx_1")
+
+    assert ctx1.durable_idempotency_key != ctx2.durable_idempotency_key
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. LIVE FAKEREDIS LUA ATOMIC OWNERSHIP & STALE OVERWRITE PREVENTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_live_fakeredis_lua_atomic_concurrency_and_expiration():
+    """
+    Executes live Redis commands and Lua scripts against fakeredis.aioredis.FakeRedis.
+    Verifies that:
+    1. Atomic release with mismatched owner does not delete the active key.
+    2. Atomic complete with mismatched owner does not overwrite the active key.
+    3. Stale complete cannot overwrite an already COMPLETED record.
+    4. Expired locks can be recovered safely without race conditions.
+    """
+    import fakeredis.aioredis
+
+    fake_client = fakeredis.aioredis.FakeRedis()
+    backend = RedisIdempotencyBackend(redis_client=fake_client, ttl_seconds=300.0, lock_timeout=0.1)
+
+    # 1. Initial acquire
+    st, _ = await backend.acquire_or_get("live_tx_1", "hash_v1", owner_token="worker_A", lock_timeout=0.1)
+    assert st == "ACQUIRED"
+
+    # 2. Worker B attempts release with wrong owner_token
+    await backend.release("live_tx_1", owner_token="stale_worker_B")
+    raw = await fake_client.get("nexus:idempotency:live_tx_1")
+    assert raw is not None
+    assert b"worker_A" in raw
+
+    # 3. Worker B attempts complete with wrong owner_token
+    await backend.complete("live_tx_1", "hash_v1", {"result": "stale_b"}, owner_token="stale_worker_B")
+    raw_after = await fake_client.get("nexus:idempotency:live_tx_1")
+    assert b"worker_A" in raw_after
+    assert b"PENDING" in raw_after
+
+    # 4. Worker A completes successfully
+    await backend.complete("live_tx_1", "hash_v1", {"result": "winner_a"}, owner_token="worker_A")
+    st_cached, val_cached = await backend.acquire_or_get("live_tx_1", "hash_v1")
+    assert st_cached == "CACHED"
+    assert val_cached == {"result": "winner_a"}
+
+    # 5. Stale late-arriving worker attempts complete over already COMPLETED record
+    await backend.complete("live_tx_1", "hash_v1", {"result": "stale_late_overwrite"}, owner_token="worker_late")
+    st_cached2, val_cached2 = await backend.acquire_or_get("live_tx_1", "hash_v1")
+    assert st_cached2 == "CACHED"
+    assert val_cached2 == {"result": "winner_a"}

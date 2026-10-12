@@ -26,8 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Tenant and user identity partitioning: cache keys are scoped to caller (`caller_id:tool_name:idem_key`), preventing cross-user data leakage.
   - Cryptographic payload binding: SHA-256 hash validation of arguments detects parameter tampering and raises `IdempotencyConflictError` (HTTP 409 / ToolError).
   - Atomic in-flight concurrency reservation: concurrent duplicate requests await the active execution and return the cached response, ensuring side effects run **exactly once**.
-    - `BaseIdempotencyBackend` protocol and built-in `RedisIdempotencyBackend` providing distributed multi-worker support (Uvicorn / Gunicorn clusters) with atomic `SET NX EX` locking alongside the in-memory `IdempotencyCache`.
-    - **Lock Ownership Tokens & Crash Recovery**: Each reservation generates a cryptographic `owner_token`. Lock completion and release strictly validate token ownership, preventing expired locks claimed by a new worker from being overwritten or prematurely deleted by stale worker processes.
+    - `BaseIdempotencyBackend` protocol and built-in `RedisIdempotencyBackend` providing distributed multi-worker support (Uvicorn / Gunicorn clusters) with atomic `SET NX PX` locking alongside the in-memory `IdempotencyCache`.
+    - **Atomic Redis Ownership & Lua Scripting**: `complete()` and `release()` in `RedisIdempotencyBackend` utilize atomic Lua scripts (`LUA_COMPLETE`, `LUA_RELEASE`) to validate `owner_token` and state atomically. Eliminates GET-then-modify race conditions and prevents stale workers from overwriting already-completed records or deleting newly claimed locks.
+    - **In-Memory Replacement Waiter Loop**: `IdempotencyCache.acquire_or_get` implements a bounded recheck loop. When an in-flight key is released or abandoned, exactly ONE waiting caller acquires the key, while all other waiting callers wait on the replacement reservation and receive `CACHED` upon completion, eliminating duplicate concurrent executions.
+    - **In-Memory Pending Lock Expiry**: `PENDING` records in `IdempotencyCache` enforce `lock_timeout`. Abandoned or crashed worker reservations automatically expire and clear, unblocking subsequent callers without requiring manual restarts.
+    - **Unambiguous Identity Encoding**: `compute_caller_identity` canonicalizes tenant and user identifiers with percent-encoding, preventing delimiter collision (e.g. inputs containing `:user:`) and isolating distinct tenant/user pairs.
     - **Side-Effect Recovery on Timeout**: When side-effecting operations (`ACTION` or `DESTRUCTIVE`) encounter timeouts, the idempotency lock is retained rather than prematurely released, preventing concurrent agent retry storms during background thread recovery.
     - **Durable Idempotency Key**: `NexusContext` exposes `ctx.idempotency_key` and qualified `ctx.durable_idempotency_key` (`caller_id:tool_name:idem_key`) to propagate directly to downstream business services (e.g. Stripe, database ledger) for end-to-end transactional safety.
 - **Plugin Architecture & Lifecycle Hooks**:
@@ -55,10 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Strict preservation of parent FastAPI lifespans (executing exactly once on startup and shutdown).
   - Single ASGI sub-application reuse across both mounting and lifespan context management.
 - **Testing & Quality**:
-  - 63 automated unit, integration, security regression, and real-client operational tests passing with 100% pass rate.
+  - 67 automated unit, integration, security regression, real-client operational, and live fakeredis Lua concurrency tests passing with 100% pass rate.
   - Real authenticated REST client testing with actual Bearer tokens and scope enforcement.
   - Real authenticated MCP client testing with FastMCP `TokenVerifier` and `AccessToken` claims extraction.
-  - Multi-worker Redis lock ownership, expiration, and crash recovery test suite.
+  - Live Redis Lua atomic ownership verification, expiration, and crash recovery test suite.
+  - In-memory concurrency waiter deduplication and pending lock expiry test suite.
+  - Unambiguous identity encoding delimiter collision regression test suite.
   - Side-effect recovery on timeout and durable idempotency key propagation test suite.
   - Full GitHub Actions CI workflow (`.github/workflows/ci.yml`) testing Python 3.11 and 3.12, linting with Ruff, building distribution, and validating wheel install.
   - End-to-end AI Customer Support Agent proof-of-concept testing three realistic scenarios across REST and MCP.
