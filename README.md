@@ -144,7 +144,177 @@ async def fetch_external(resource_id: str):
     return response.json()
 ```
 
+### Exposure Control: API Only, MCP Only, or Both
+
+Control interface exposure at both the **application level** and **individual tool level**.
+
+#### 1. Server-Level Control
+Set the exposure mode during initialization or when calling `finalize()`:
+
+```python
+# Option A: Both REST API and MCP (default)
+nexus = UnifiedNexus("MyApp", expose="both")
+
+# Option B: REST API Only (disables MCP endpoint and lifespan)
+nexus = UnifiedNexus("MyApp", expose="api")
+
+# Option C: MCP Only (disables REST API routes and Swagger docs)
+nexus = UnifiedNexus("MyApp", expose="mcp")
+
+# Override at finalization if desired:
+app = nexus.finalize(expose="api")  # or expose="mcp", expose="both"
+```
+
+| Mode | REST Routes (`/docs`) | MCP Endpoint (`/mcp`) |
+|------|----------------------|-----------------------|
+| `"both"` | ✅ Active | ✅ Active |
+| `"api"` | ✅ Active | ❌ Disabled (404) |
+| `"mcp"` | ❌ Disabled (404) | ✅ Active |
+
+#### 2. Tool-Level Control
+Decide which interfaces expose specific functions:
+
+```python
+# Expose ONLY to REST API
+@nexus.universal_tool(path="/web-dashboard", expose="api")
+def web_only_data():
+    return {"status": "ok"}
+
+# Or use the shortcut decorator:
+@nexus.api_only("/metrics")
+def get_metrics():
+    return {"cpu": 12}
+
+# Expose ONLY to MCP AI Agents (path is optional!)
+@nexus.universal_tool(expose="mcp")
+def query_vector_store(query: str):
+    return {"results": [...]}
+
+# Or use the shortcut decorator:
+@nexus.mcp_only
+def plan_agent_task(step: str):
+    return {"step": step}
+
+# Expose to BOTH REST and MCP (default)
+@nexus.universal_tool(path="/shared-tool", expose="both")
+def shared_tool():
+    return {"shared": True}
+```
+
 ---
+
+### Industry-Standard Microservice Integration (Mounting to Existing FastAPI Apps)
+
+In real-world microservice architectures, you already have an existing `FastAPI` application with database pools, telemetry, auth dependencies (`Depends`), and custom lifespans. UnifiedNexus can be **mounted directly onto your existing app**:
+
+```python
+from fastapi import FastAPI, APIRouter, Depends
+from unified_nexus import UnifiedNexus
+
+# 1. Your existing microservice application with custom lifespan
+app = FastAPI(title="PaymentMicroservice", version="2.0.0")
+
+# 2. Initialize UnifiedNexus
+nexus = UnifiedNexus("PaymentNexus")
+
+# Database dependency (FastAPI Depends is automatically resolved in MCP tool calls!)
+def get_db():
+    return "session_postgres"
+
+# Fine-grained endpoint control:
+@nexus.universal_tool(path="/charge", expose="both")
+def charge_card(amount: float, db: str = Depends(get_db)):
+    """Exposed to both HTTP REST clients and AI Agents."""
+    return {"status": "paid", "amount": amount}
+
+@nexus.api_only(path="/internal-health")
+def internal_health():
+    """REST only — hidden from AI agents."""
+    return {"status": "ok"}
+
+@nexus.mcp_only
+def fraud_analysis(account_id: str):
+    """MCP only — accessible exclusively by AI agents."""
+    return {"risk": "low"}
+
+# Expose an existing microservice APIRouter to MCP:
+billing_router = APIRouter()
+@billing_router.get("/invoices")
+def get_invoices():
+    return {"invoices": []}
+
+nexus.include_router(billing_router, prefix="/billing", expose="both")
+
+# 3. Mount directly to your existing FastAPI microservice
+nexus.attach_to(
+    app,
+    api_prefix="/api/v1",  # Prefixes REST routes: /api/v1/charge, /api/v1/billing/invoices
+    mcp_path="/",          # MCP endpoint available at /mcp
+    mode="both",           # 'both', 'api', or 'mcp'
+)
+
+# 4. Your existing ASGI server runs app unchanged:
+# uvicorn.run(app, host="0.0.0.0", port=8000)
+```
+
+#### Key Microservice Features:
+- **Lifespan Composition**: Automatically chains your existing database/Kafka lifespans with FastMCP's task group.
+- **`Depends()` Resolution**: FastAPI dependencies in your endpoints are resolved automatically when invoked by AI agents via MCP.
+- **Versioned API Prefixing**: `api_prefix="/api/v1"` keeps your REST API versioned while FastMCP tools maintain clean operation names.
+- **Full Router Interoperability**: `nexus.include_router(..., expose="both")` instantly makes entire existing APIRouters accessible to AI tools.
+
+---
+
+### LangServe & UnifiedNexus Collaboration (The Killer Advantage)
+
+Modern AI backends typically require **two communication layers**:
+1. **LangServe**: Serves LangChain LCEL chains via HTTP (`/invoke`, `/stream`, `/batch`, interactive playground) for web and mobile frontends.
+2. **UnifiedNexus (FastMCP)**: Serves native tool calling via Model Context Protocol (`/mcp` SSE) for autonomous AI agents (Claude, Cursor, Copilot, ChatGPT).
+
+Mounting LangServe and UnifiedNexus together on a **single FastAPI app** solves the AI backend dilemma:
+
+```python
+from fastapi import FastAPI
+from langserve import add_routes
+from langchain_core.runnables import RunnableLambda
+from unified_nexus import UnifiedNexus
+
+app = FastAPI(title="HybridAIPlatform")
+nexus = UnifiedNexus("EnterpriseNexus")
+
+# 1. LangChain LCEL Chain (served via LangServe)
+def summarize_doc(data: dict):
+    return {"summary": data["text"].upper()}
+
+summary_chain = RunnableLambda(summarize_doc)
+add_routes(app, summary_chain, path="/summarize")
+
+# 2. UnifiedNexus Universal Tool (accessible via REST and MCP)
+@nexus.universal_tool(path="/search", expose="both")
+def search_knowledge_base(query: str):
+    """Semantic document search tool."""
+    return {"query": query, "results": ["Doc #1", "Doc #2"]}
+
+# 3. FastMCP tool that invokes the LangChain chain in-process!
+@nexus.mcp_only
+async def agent_summarizer(content: str):
+    """Summarizes text using the internal LCEL chain."""
+    return await summary_chain.ainvoke({"text": content})
+
+# 4. Attach UnifiedNexus to the same FastAPI app
+nexus.attach_to(app, api_prefix="/api/v1", mcp_path="/")
+
+# Run with: uvicorn app:app --port 8000
+```
+
+#### Why This Is Game-Changing:
+- **Single Process, Single Port**: Web frontends stream LCEL chains via LangServe, while AI agents call tools via MCP.
+- **In-Process Chain Execution**: MCP tools can invoke LangChain runnables directly without extra HTTP hops.
+- **Zero Drift**: Data schemas and business logic stay unified across both human users and AI agents.
+
+---
+
+
 
 ## Connecting AI Agents
 
@@ -173,50 +343,65 @@ npx -y @modelcontextprotocol/inspector http://localhost:8000/mcp
 
 ---
 
-**Here's a simple example of how to use APIRouter with UnifiedNexus framework:**
-```python
-from fastapi import APIRouter
-from pydantic import BaseModel
-from unified_nexus import UnifiedNexus
+## 📂 Feature Examples
 
-nexus = UnifiedNexus("My API")
+The [`examples/`](examples/) directory contains complete, runnable demonstrations for each feature:
 
-# ── 1. Create a router ──────────────────────────────────────
-user_router = APIRouter()
+| Example | Feature Highlight | Command |
+|---|---|---|
+| [`01_quickstart.py`](examples/01_quickstart.py) | Basic unified tool, auto GET/POST detection, Swagger & MCP | `python examples/01_quickstart.py` |
+| [`02_exposure_modes.py`](examples/02_exposure_modes.py) | Exposure control (`both`, `api`, `mcp`), `@api_only`, `@mcp_only` | `python examples/02_exposure_modes.py` |
+| [`03_router_integration.py`](examples/03_router_integration.py) | Modular `APIRouter` support & auto-exposing routers to MCP | `python examples/03_router_integration.py` |
+| [`04_middleware_and_security.py`](examples/04_middleware_and_security.py) | Shared CORS/timing middleware, LLM error recovery hints | `python examples/04_middleware_and_security.py` |
+| [`05_dependency_injection.py`](examples/05_dependency_injection.py) | Automatic FastAPI `Depends()` resolution in MCP calls | `python examples/05_dependency_injection.py` |
+| [`06_microservice_mount.py`](examples/06_microservice_mount.py) | Mounting to existing FastAPI apps, composed lifespans, `/api/v1` | `python examples/06_microservice_mount.py` |
+| [`07_stdio_agent_server.py`](examples/07_stdio_agent_server.py) | Stdio transport for local Claude Desktop CLI & Cursor | `python examples/07_stdio_agent_server.py` |
+| [`08_langserve_collaboration.py`](examples/08_langserve_collaboration.py) | LangServe LCEL chain + FastMCP tools in the same FastAPI app | `python examples/08_langserve_collaboration.py` |
+| [`microservice_example.py`](examples/microservice_example.py) | Production customer order microservice with health probes | `python examples/microservice_example.py` |
 
-class UserCreate(BaseModel):
-    name: str
-    email: str
+---
 
-# ── 2. Attach endpoints to the router using @nexus.universal_tool ──
-@nexus.universal_tool(path="/", tags=["Users"], router=user_router)
-def get_users():
-    """Get all users"""
-    return {"users": ["Alice", "Bob"]}
+## 🚀 Production Readiness & PyPI Publishing
 
-@nexus.universal_tool(path="/{user_id}", tags=["Users"], router=user_router)
-def get_user(user_id: int):
-    """Get a single user"""
-    return {"user_id": user_id, "name": "Alice"}
+UnifiedNexus is **100% production-ready**:
+- ✅ **Fully Typed (PEP 561)**: Includes `py.typed` marker for static typing (mypy, pyright).
+- ✅ **Packaging**: Standard PEP 621 / Hatchling configuration with clean wheel targets.
+- ✅ **Automated Test Coverage**: 24 tests covering edge cases, dependency injection, and lifespans.
+- ✅ **Error Resilient**: Converts unexpected exceptions into structured hints for LLMs.
 
-@nexus.universal_tool(path="/", tags=["Users"], router=user_router)
-def create_user(user: UserCreate):
-    """Create a new user"""
-    return {"message": f"Created {user.name}"}
+### Building & Publishing to PyPI
 
-# ── 3. Register the router with a prefix ────────────────────
-nexus.include_router(user_router, prefix="/users", tags=["Users"])
+```bash
+# 1. Build the distribution packages (.tar.gz and .whl)
+uv build
+# or: python -m build
 
-# ── 4. Finalize ─────────────────────────────────────────────
-app = nexus.finalize()
+# 2. Check the built packages
+twine check dist/*
+
+# 3. Publish to PyPI
+twine upload dist/*
+# or: uv publish
 ```
+
+---
+
+## Testing
+
+Run the comprehensive test suite across Python 3.11 and 3.12:
+
+```bash
+pytest tests -v
+```
+
 ## Requirements
 
 - Python 3.11+
-- FastAPI
-- FastMCP
-- Uvicorn
-- Pydantic v2
+- FastAPI >= 0.115.0
+- FastMCP >= 2.0.0
+- Uvicorn >= 0.30.0
+- Pydantic >= 2.0.0
+
 
 ---
 
