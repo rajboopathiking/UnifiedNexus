@@ -601,25 +601,14 @@ return 0
         }, default=str)
         ttl_arg = int(self._ttl)
 
-        if hasattr(client, "eval"):
-            try:
-                await client.eval(self.LUA_COMPLETE, 1, full_key, token_arg, completed_data, ttl_arg)
-                return
-            except Exception:
-                pass
+        if not hasattr(client, "eval"):
+            raise SecurityConfigurationError(
+                "RedisIdempotencyBackend requires a Redis client supporting atomic Lua scripting ('eval'). "
+                "Non-atomic fallbacks are forbidden in production to prevent lock ownership races."
+            )
 
-        # Fallback for simple mock clients without eval:
-        raw = await client.get(full_key)
-        if raw:
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8")
-            try:
-                record = json.loads(raw)
-                if record.get("status") == "PENDING":
-                    if not owner_token or record.get("owner_token") == owner_token:
-                        await client.set(full_key, completed_data, ex=ttl_arg)
-            except Exception:
-                pass
+        # Atomic Lua execution - propagate any server or connection exceptions fail-closed
+        await client.eval(self.LUA_COMPLETE, 1, full_key, token_arg, completed_data, ttl_arg)
 
     async def release(self, key: str, owner_token: str | None = None) -> None:
         """
@@ -627,30 +616,21 @@ return 0
         Guarantees lock ownership atomically via Lua script:
         - Only deletes if the lock still belongs to owner_token and is PENDING.
         - Never deletes another worker's new lock or a COMPLETED result.
+        Fail-closed: requires atomic eval and propagates Lua execution failures without
+        falling back to non-atomic GET/DEL races.
         """
         client = await self._get_client()
         full_key = f"{self._key_prefix}{key}"
         token_arg = owner_token or ""
 
-        if hasattr(client, "eval"):
-            try:
-                await client.eval(self.LUA_RELEASE, 1, full_key, token_arg)
-                return
-            except Exception:
-                pass
+        if not hasattr(client, "eval"):
+            raise SecurityConfigurationError(
+                "RedisIdempotencyBackend requires a Redis client supporting atomic Lua scripting ('eval'). "
+                "Non-atomic fallbacks are forbidden in production to prevent lock ownership races."
+            )
 
-        # Fallback for simple mock clients without eval:
-        raw = await client.get(full_key)
-        if raw:
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8")
-            try:
-                record = json.loads(raw)
-                if record.get("status") == "PENDING":
-                    if not owner_token or record.get("owner_token") == owner_token:
-                        await client.delete(full_key)
-            except Exception:
-                pass
+        # Atomic Lua execution - propagate any server or connection exceptions fail-closed
+        await client.eval(self.LUA_RELEASE, 1, full_key, token_arg)
 
     async def close(self) -> None:
         """Closes the underlying Redis connection if supported."""

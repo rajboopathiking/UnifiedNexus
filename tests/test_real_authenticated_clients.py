@@ -23,6 +23,7 @@ from unified_nexus import (
     NexusContext,
     NexusPlugin,
     RedisIdempotencyBackend,
+    SecurityConfigurationError,
     ToolSafetyLevel,
     ToolTimeoutError,
     UnifiedNexus,
@@ -424,3 +425,119 @@ async def test_live_fakeredis_lua_atomic_concurrency_and_expiration():
     st_cached2, val_cached2 = await backend.acquire_or_get("live_tx_1", "hash_v1")
     assert st_cached2 == "CACHED"
     assert val_cached2 == {"result": "winner_a"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. FAIL-CLOSED EVAL ERROR PROPAGATION (NO NON-ATOMIC PRODUCTION FALLBACK)
+# ─────────────────────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_redis_eval_failure_propagates_fail_closed_without_non_atomic_fallback():
+    """
+    Verifies that if Redis EVAL fails (e.g. script error or server failure),
+    RedisIdempotencyBackend does NOT fall back to non-atomic GET->SET/DEL operations.
+    It strictly propagates the failure fail-closed to prevent lock ownership races.
+    """
+    class BrokenEvalRedis:
+        def __init__(self):
+            self.store = {}
+
+        async def get(self, key: str):
+            return self.store.get(key)
+
+        async def set(self, key: str, val: str, **kwargs):
+            self.store[key] = val
+            return True
+
+        async def eval(self, script: str, numkeys: int, *args):
+            raise RuntimeError("Redis EVAL script execution failed on cluster node")
+
+    broken_client = BrokenEvalRedis()
+    backend = RedisIdempotencyBackend(redis_client=broken_client)
+
+    # 1. Verification: complete() must propagate the eval error fail-closed
+    with pytest.raises(RuntimeError) as exc_complete:
+        await backend.complete("tx_broken", "hash_1", {"data": 123}, owner_token="token_1")
+    assert "Redis EVAL script execution failed" in str(exc_complete.value)
+
+    # 2. Verification: release() must propagate the eval error fail-closed
+    with pytest.raises(RuntimeError) as exc_release:
+        await backend.release("tx_broken", owner_token="token_1")
+    assert "Redis EVAL script execution failed" in str(exc_release.value)
+
+
+@pytest.mark.asyncio
+async def test_redis_rejects_client_without_eval():
+    """
+    Verifies that passing a Redis client without 'eval' raises SecurityConfigurationError,
+    preventing unsafe non-atomic concurrency degradation.
+    """
+    class ClientWithoutEval:
+        async def get(self, key: str):
+            return None
+
+        async def set(self, key: str, val: str, **kwargs):
+            return True
+
+    backend = RedisIdempotencyBackend(redis_client=ClientWithoutEval())
+
+    with pytest.raises(SecurityConfigurationError) as exc_complete:
+        await backend.complete("tx_no_eval", "hash_1", {"data": 1}, owner_token="tok")
+    assert "requires a Redis client supporting atomic Lua scripting" in str(exc_complete.value)
+
+    with pytest.raises(SecurityConfigurationError) as exc_release:
+        await backend.release("tx_no_eval", owner_token="tok")
+    assert "requires a Redis client supporting atomic Lua scripting" in str(exc_release.value)
+
+
+@pytest.mark.asyncio
+async def test_live_redis_worker_crash_and_recovery_lifecycle():
+    """
+    Simulates a live worker crash during execution against fakeredis:
+    1. Worker A acquires key and crashes mid-flight.
+    2. Redis key expires after lock TTL.
+    3. Worker B discovers expired key, acquires reservation with new owner_token.
+    4. Stale Worker A revives and attempts release and complete.
+       Both are rejected atomically by Redis Lua without corrupting Worker B.
+    5. Worker B completes cleanly and stores the final result.
+    6. Subsequent calls return CACHED with Worker B's result.
+    """
+    fakeredis = pytest.importorskip("fakeredis.aioredis", reason="fakeredis is required for live redis tests")
+    fake_client = fakeredis.FakeRedis()
+
+    backend = RedisIdempotencyBackend(redis_client=fake_client, ttl_seconds=300.0, lock_timeout=0.08)
+
+    # 1. Worker A acquires key
+    st_a, _ = await backend.acquire_or_get("crash_job", "hash_crash", owner_token="worker_A", lock_timeout=0.08)
+    assert st_a == "ACQUIRED"
+
+    # 2. Worker A crashes (stops responding, doesn't complete or release)
+    # Wait for lock TTL to expire in Redis
+    await asyncio.sleep(0.12)
+
+    # 3. Worker B arrives, detects key is expired, and acquires new lock
+    st_b, _ = await backend.acquire_or_get("crash_job", "hash_crash", owner_token="worker_B", lock_timeout=0.2)
+    assert st_b == "ACQUIRED"
+
+    # 4. Worker A awakens and attempts to release the key
+    await backend.release("crash_job", owner_token="worker_A")
+
+    # Worker B's lock in Redis MUST NOT be deleted!
+    raw_lock = await fake_client.get("nexus:idempotency:crash_job")
+    assert raw_lock is not None
+    assert b"worker_B" in raw_lock
+
+    # 5. Worker A attempts to complete the key with stale result
+    await backend.complete("crash_job", "hash_crash", {"result": "stale_A"}, owner_token="worker_A")
+
+    # Worker B's lock in Redis MUST NOT be overwritten!
+    raw_lock_after = await fake_client.get("nexus:idempotency:crash_job")
+    assert b"worker_B" in raw_lock_after
+    assert b"PENDING" in raw_lock_after
+
+    # 6. Worker B completes successfully
+    await backend.complete("crash_job", "hash_crash", {"result": "recovered_B"}, owner_token="worker_B")
+
+    # 7. Subsequent caller receives CACHED result from Worker B
+    st_final, val_final = await backend.acquire_or_get("crash_job", "hash_crash")
+    assert st_final == "CACHED"
+    assert val_final == {"result": "recovered_B"}

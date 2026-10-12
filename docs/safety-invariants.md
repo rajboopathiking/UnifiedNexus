@@ -108,6 +108,7 @@ To prevent stale workers from corrupting state upon late completion or error:
   - Stale workers can never delete another worker's new reservation.
   - Stale workers can never overwrite a record that was already `COMPLETED`.
   - Millisecond precision is enforced via Redis `SET NX PX`.
+  - **Fail-Closed Execution**: No non-atomic fallback operations exist. If an `EVAL` script execution encounters an error, the exception propagates fail-closed rather than falling back to uncoordinated `GET`/`SET` races. Clients without `eval` are rejected with `SecurityConfigurationError`.
 
 ### H. In-Memory Waiter Deduplication & Pending Lock Expiry
 For single-worker deployments utilizing `IdempotencyCache`:
