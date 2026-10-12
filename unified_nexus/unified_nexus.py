@@ -354,8 +354,10 @@ class UnifiedNexus:
             cache_key = None
             payload_hash = None
             acquired_idempotency = False
+            owner_token = str(uuid.uuid4())
 
             if idempotent and idem_key:
+                ctx.idempotency_key = str(idem_key)
                 # Reject unauthenticated/missing identities for privileged tools rather than
                 # using the shared "anonymous" fallback partition.
                 is_privileged = bool(
@@ -377,6 +379,8 @@ class UnifiedNexus:
                     key=cache_key,
                     payload_hash=payload_hash,
                     wait_timeout=min(float(effective_timeout or 30.0), 30.0),
+                    owner_token=owner_token,
+                    lock_timeout=max(float(effective_timeout or 30.0) * 2.0, 60.0),
                 )
 
                 if idem_status == "CONFLICT":
@@ -444,19 +448,31 @@ class UnifiedNexus:
 
                 # 10. Complete idempotent reservation if key was acquired
                 if acquired_idempotency and cache_key and payload_hash:
-                    await self._idempotency_cache.complete(cache_key, payload_hash, bounded_res)
+                    await self._idempotency_cache.complete(
+                        cache_key, payload_hash, bounded_res, owner_token=owner_token
+                    )
 
                 # 11. Trigger plugin after_execute hooks
                 final_res = await self.plugins.trigger_after_execute(ctx, bounded_res)
                 return final_res
 
-            except Exception:
-                # Release idempotency lock if tool failed so retries can execute
-                if acquired_idempotency and cache_key:
+            except Exception as e:
+                # If tool failed with timeout on a side-effecting operation (ACTION or DESTRUCTIVE),
+                # do NOT release the reservation immediately. Releasing immediately invites a concurrent
+                # retry storm while the background worker thread may still be running.
+                is_timeout = isinstance(e, (TimeoutError, asyncio.TimeoutError, ToolTimeoutError))
+                is_side_effecting = tool_type in (ToolSafetyLevel.ACTION, ToolSafetyLevel.DESTRUCTIVE)
+
+                if acquired_idempotency and cache_key and not (is_timeout and is_side_effecting):
                     try:
-                        await self._idempotency_cache.release(cache_key)
+                        await self._idempotency_cache.release(cache_key, owner_token=owner_token)
                     except Exception:
                         pass
+                elif acquired_idempotency and cache_key and is_timeout and is_side_effecting:
+                    logger.warning(
+                        f"[{ctx.request_id}] Side-effecting tool '{tool_name}' timed out. Retaining idempotency "
+                        f"lock for key '{cache_key}' to prevent duplicate concurrent execution during recovery."
+                    )
                 raise
 
         except asyncio.CancelledError as ce:
@@ -966,8 +982,28 @@ class UnifiedNexus:
         roles = ep.get("roles")
         scopes = ep.get("scopes")
 
+        sig = inspect.signature(func)
+        has_req_param = any(p.annotation is Request for p in sig.parameters.values())
+
+        if not has_req_param:
+            new_params = list(sig.parameters.values()) + [
+                inspect.Parameter("__nexus_req__", inspect.Parameter.KEYWORD_ONLY, annotation=Request, default=None)
+            ]
+            wrapper_sig = sig.replace(parameters=new_params)
+        else:
+            wrapper_sig = sig
+
         @functools.wraps(func)
         async def rest_wrapper(*args, **kwargs):
+            req = kwargs.pop("__nexus_req__", None)
+            if req is None:
+                for arg in args:
+                    if isinstance(arg, Request):
+                        req = arg
+                        break
+            if req is None and "request" in kwargs and isinstance(kwargs["request"], Request):
+                req = kwargs["request"]
+
             request_id = str(uuid.uuid4())
             ctx = NexusContext(
                 transport="rest",
@@ -977,27 +1013,35 @@ class UnifiedNexus:
                 metadata={"tool_type": tool_type.value},
             )
 
-            # Extract trusted caller identity from Request state if available
-            for arg in args:
-                if isinstance(arg, Request):
-                    if hasattr(arg.state, "user"):
-                        ctx.principal = arg.state.user
-                    if hasattr(arg.state, "permissions"):
-                        ctx.permissions = set(arg.state.permissions)
-            if "request" in kwargs and isinstance(kwargs["request"], Request):
-                req = kwargs["request"]
+            # Extract trusted caller identity and scopes/permissions from Request state
+            if req is not None and hasattr(req, "state"):
                 if hasattr(req.state, "user"):
                     ctx.principal = req.state.user
+                elif hasattr(req.state, "principal"):
+                    ctx.principal = req.state.principal
                 if hasattr(req.state, "permissions"):
-                    ctx.permissions = set(req.state.permissions)
+                    if isinstance(req.state.permissions, (list, tuple, set)):
+                        ctx.permissions.update(req.state.permissions)
+                    elif isinstance(req.state.permissions, str):
+                        ctx.permissions.add(req.state.permissions)
+                if hasattr(req.state, "scopes"):
+                    if isinstance(req.state.scopes, (list, tuple, set)):
+                        ctx.permissions.update(req.state.scopes)
+                    elif isinstance(req.state.scopes, str):
+                        ctx.permissions.update(req.state.scopes.split())
 
-            # Auto-extract roles if principal is a dict with roles
+            # Auto-extract roles if principal is a dict with roles/scopes
             if isinstance(ctx.principal, dict):
                 principal_roles = ctx.principal.get("roles") or ctx.principal.get("role") or []
                 if isinstance(principal_roles, str):
                     ctx.permissions.add(principal_roles)
                 elif isinstance(principal_roles, (list, set, tuple)):
                     ctx.permissions.update(principal_roles)
+                principal_scopes = ctx.principal.get("scopes") or ctx.principal.get("scope") or []
+                if isinstance(principal_scopes, str):
+                    ctx.permissions.update(principal_scopes.split())
+                elif isinstance(principal_scopes, (list, set, tuple)):
+                    ctx.permissions.update(principal_scopes)
 
             try:
                 return await self._execute_unified_pipeline(
@@ -1029,6 +1073,7 @@ class UnifiedNexus:
             except Exception:
                 raise
 
+        rest_wrapper.__signature__ = wrapper_sig
         return rest_wrapper
 
     # ─────────────────────────────────────────────

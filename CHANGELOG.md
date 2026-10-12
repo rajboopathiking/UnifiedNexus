@@ -26,11 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Tenant and user identity partitioning: cache keys are scoped to caller (`caller_id:tool_name:idem_key`), preventing cross-user data leakage.
   - Cryptographic payload binding: SHA-256 hash validation of arguments detects parameter tampering and raises `IdempotencyConflictError` (HTTP 409 / ToolError).
   - Atomic in-flight concurrency reservation: concurrent duplicate requests await the active execution and return the cached response, ensuring side effects run **exactly once**.
-  - `BaseIdempotencyBackend` protocol and built-in `RedisIdempotencyBackend` providing distributed multi-worker support (Uvicorn / Gunicorn clusters) with atomic `SET NX EX` locking alongside the in-memory `IdempotencyCache`.
+    - `BaseIdempotencyBackend` protocol and built-in `RedisIdempotencyBackend` providing distributed multi-worker support (Uvicorn / Gunicorn clusters) with atomic `SET NX EX` locking alongside the in-memory `IdempotencyCache`.
+    - **Lock Ownership Tokens & Crash Recovery**: Each reservation generates a cryptographic `owner_token`. Lock completion and release strictly validate token ownership, preventing expired locks claimed by a new worker from being overwritten or prematurely deleted by stale worker processes.
+    - **Side-Effect Recovery on Timeout**: When side-effecting operations (`ACTION` or `DESTRUCTIVE`) encounter timeouts, the idempotency lock is retained rather than prematurely released, preventing concurrent agent retry storms during background thread recovery.
+    - **Durable Idempotency Key**: `NexusContext` exposes `ctx.idempotency_key` and qualified `ctx.durable_idempotency_key` (`caller_id:tool_name:idem_key`) to propagate directly to downstream business services (e.g. Stripe, database ledger) for end-to-end transactional safety.
 - **Plugin Architecture & Lifecycle Hooks**:
   - `NexusPlugin` protocol with `startup()`, `before_execute()`, `after_execute()`, `on_error()`, and `shutdown()`.
   - `nexus.add_plugin(plugin)` for intercepting both REST and MCP requests with a single plugin.
-  - `NexusContext` capturing transport (`'rest'` | `'mcp'`), request/correlation ID, tool name, verified caller principal, permissions, and duration.
+  - `NexusContext` capturing transport (`'rest'` | `'mcp'`), request/correlation ID, tool name, verified caller principal, permissions, duration, and idempotency keys.
 - **Enterprise Security & Boundaries**:
   - Rejection of unsupported FastAPI `Depends()` and `Security()` defaults in MCP tools via `SecurityConfigurationError`.
   - Blocked sensitive credential parameters (`password`, `token`, `secret`, `api_key`) from LLM tool argument exposure.
@@ -39,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Automatic secret and credential redaction from internal exception traces and logs.
   - Dedicated `rest_auth` parameter on `UnifiedNexus` for REST API boundary security.
   - Native FastMCP error signaling via `ToolError` (ensuring `isError: true` JSON-RPC response).
+  - Dynamic Starlette `Request` injection into REST route wrappers ensuring caller `request.state` (authenticated user and scopes) is seamlessly bound even when handlers do not declare `request: Request`.
 - **AI-Agent Safety Invariants**:
   - `ToolSafetyLevel` classification (`READ_ONLY`, `ACTION`, `DESTRUCTIVE`).
   - Human approval hooks (`approval_hook`) and per-tool `requires_approval` flags for destructive operations.
@@ -51,7 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Strict preservation of parent FastAPI lifespans (executing exactly once on startup and shutdown).
   - Single ASGI sub-application reuse across both mounting and lifespan context management.
 - **Testing & Quality**:
-  - 58 automated unit, integration, and security regression tests passing with 100% pass rate.
+  - 63 automated unit, integration, security regression, and real-client operational tests passing with 100% pass rate.
+  - Real authenticated REST client testing with actual Bearer tokens and scope enforcement.
+  - Real authenticated MCP client testing with FastMCP `TokenVerifier` and `AccessToken` claims extraction.
+  - Multi-worker Redis lock ownership, expiration, and crash recovery test suite.
+  - Side-effect recovery on timeout and durable idempotency key propagation test suite.
   - Full GitHub Actions CI workflow (`.github/workflows/ci.yml`) testing Python 3.11 and 3.12, linting with Ruff, building distribution, and validating wheel install.
   - End-to-end AI Customer Support Agent proof-of-concept testing three realistic scenarios across REST and MCP.
 

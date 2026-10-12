@@ -99,6 +99,18 @@ For tools declared with `roles`, `scopes`, `requires_approval`, or classified as
 - UnifiedNexus strictly **rejects** unauthenticated callers (`ctx.principal is None`) with `AuthorizationError`.
 - Privileged operations never fall back to the shared `"anonymous"` cache partition, completely preventing cross-tenant and unauthenticated idempotency key hijacking.
 
+### G. Lock Ownership Tokens & Crash Recovery
+In distributed Redis environments, if a worker crashes or an operation outlasts its initial lock TTL, another worker may legitimately acquire the key.
+To prevent the initial worker from corrupting state upon late completion or error:
+- Each reservation generates a cryptographic `owner_token`.
+- `complete()` and `release()` in `RedisIdempotencyBackend` strictly validate that the active record still matches the `owner_token`.
+- Expired or stale workers cannot delete a new worker's lock or overwrite its pending reservation.
+
+### H. Side-Effect Timeout Recovery & Durable Idempotency Keys
+When a state-modifying tool (`ToolSafetyLevel.ACTION` or `DESTRUCTIVE`) encounters a timeout:
+- **Lock Retention**: UnifiedNexus retains the idempotency lock in the cache rather than releasing it immediately. This blocks concurrent agent retry storms from executing duplicate actions while background tasks complete or wind down.
+- **Durable Business-Layer Idempotency**: `NexusContext` exposes `ctx.idempotency_key` and qualified `ctx.durable_idempotency_key` (`f"{caller_id}:{tool_name}:{idempotency_key}"`). Critical services should forward this durable key directly to transactional downstream APIs (e.g. Stripe, database ledger inserts) to achieve true end-to-end exactly-once execution.
+
 ---
 
 ## 4. Bounded Input & Output Payloads

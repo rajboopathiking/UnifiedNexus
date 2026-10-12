@@ -198,7 +198,12 @@ class BaseIdempotencyBackend(Protocol):
     """Protocol for idempotency storage backends (in-memory or distributed)."""
 
     async def acquire_or_get(
-        self, key: str, payload_hash: str, wait_timeout: float = 30.0
+        self,
+        key: str,
+        payload_hash: str,
+        wait_timeout: float = 30.0,
+        owner_token: str | None = None,
+        lock_timeout: float | None = None,
     ) -> tuple[str, Any]:
         """
         Atomically inspects and reserves an idempotency key.
@@ -210,11 +215,21 @@ class BaseIdempotencyBackend(Protocol):
         """
         ...
 
-    async def complete(self, key: str, payload_hash: str, result: Any) -> None:
+    async def complete(
+        self,
+        key: str,
+        payload_hash: str,
+        result: Any,
+        owner_token: str | None = None,
+    ) -> None:
         """Marks key as completed and stores the result."""
         ...
 
-    async def release(self, key: str) -> None:
+    async def release(
+        self,
+        key: str,
+        owner_token: str | None = None,
+    ) -> None:
         """Releases a pending reservation if tool execution fails."""
         ...
 
@@ -226,6 +241,7 @@ class IdempotencyRecord:
     created_at: float
     result: Any = None
     event: asyncio.Event = field(default_factory=asyncio.Event)
+    owner_token: str | None = None
 
 
 class IdempotencyCache:
@@ -262,7 +278,12 @@ class IdempotencyCache:
                 del self._cache[oldest_key]
 
     async def acquire_or_get(
-        self, key: str, payload_hash: str, wait_timeout: float = 30.0
+        self,
+        key: str,
+        payload_hash: str,
+        wait_timeout: float = 30.0,
+        owner_token: str | None = None,
+        lock_timeout: float | None = None,
     ) -> tuple[str, Any]:
         """
         Atomically reserves an idempotency key or retrieves the cached result.
@@ -285,6 +306,7 @@ class IdempotencyCache:
                     payload_hash=payload_hash,
                     created_at=now,
                     event=event,
+                    owner_token=owner_token,
                 )
                 return "ACQUIRED", None
 
@@ -319,27 +341,38 @@ class IdempotencyCache:
                 payload_hash=payload_hash,
                 created_at=time.time(),
                 event=event,
+                owner_token=owner_token,
             )
             return "ACQUIRED", None
 
-    async def complete(self, key: str, payload_hash: str, result: Any) -> None:
+    async def complete(
+        self,
+        key: str,
+        payload_hash: str,
+        result: Any,
+        owner_token: str | None = None,
+    ) -> None:
         """Stores the successful result and notifies any awaiting concurrent requests."""
         async with self._lock:
             rec = self._cache.get(key)
             if rec:
+                if owner_token is not None and rec.owner_token is not None and rec.owner_token != owner_token:
+                    return
                 rec.status = "COMPLETED"
                 rec.result = result
                 rec.payload_hash = payload_hash
                 rec.created_at = time.time()
+                rec.owner_token = owner_token
                 rec.event.set()
 
-    async def release(self, key: str) -> None:
+    async def release(self, key: str, owner_token: str | None = None) -> None:
         """Releases a pending reservation if tool execution fails."""
         async with self._lock:
             rec = self._cache.get(key)
             if rec and rec.status == "PENDING":
-                rec.event.set()
-                del self._cache[key]
+                if owner_token is None or rec.owner_token is None or rec.owner_token == owner_token:
+                    rec.event.set()
+                    del self._cache[key]
 
     async def get(self, key: str) -> tuple[bool, Any]:
         """Legacy compatibility lookup."""
@@ -414,7 +447,12 @@ class RedisIdempotencyBackend:
         )
 
     async def acquire_or_get(
-        self, key: str, payload_hash: str, wait_timeout: float = 30.0
+        self,
+        key: str,
+        payload_hash: str,
+        wait_timeout: float = 30.0,
+        owner_token: str | None = None,
+        lock_timeout: float | None = None,
     ) -> tuple[str, Any]:
         """
         Atomically inspects and reserves an idempotency key in Redis.
@@ -428,15 +466,17 @@ class RedisIdempotencyBackend:
         full_key = f"{self._key_prefix}{key}"
         now = time.time()
         deadline = now + wait_timeout
+        effective_lock_timeout = int(lock_timeout if lock_timeout is not None else self._lock_timeout)
 
         pending_data = json.dumps({
             "status": "PENDING",
             "payload_hash": payload_hash,
             "created_at": now,
+            "owner_token": owner_token,
         })
 
         # Atomic reservation via SET NX EX
-        acquired = await client.set(full_key, pending_data, nx=True, ex=int(self._lock_timeout))
+        acquired = await client.set(full_key, pending_data, nx=True, ex=effective_lock_timeout)
         if acquired:
             return "ACQUIRED", None
 
@@ -445,7 +485,7 @@ class RedisIdempotencyBackend:
             raw = await client.get(full_key)
             if not raw:
                 # Key was deleted (e.g. concurrent execution failed/released lock or expired)
-                acquired = await client.set(full_key, pending_data, nx=True, ex=int(self._lock_timeout))
+                acquired = await client.set(full_key, pending_data, nx=True, ex=effective_lock_timeout)
                 if acquired:
                     return "ACQUIRED", None
                 await asyncio.sleep(self._poll_interval)
@@ -475,20 +515,49 @@ class RedisIdempotencyBackend:
 
             await asyncio.sleep(self._poll_interval)
 
-    async def complete(self, key: str, payload_hash: str, result: Any) -> None:
-        """Stores completed result with full TTL in Redis."""
+    async def complete(
+        self,
+        key: str,
+        payload_hash: str,
+        result: Any,
+        owner_token: str | None = None,
+    ) -> None:
+        """
+        Stores completed result with full TTL in Redis.
+        Validates lock ownership: if the lock expired and was claimed by another worker,
+        does not overwrite the new owner's active reservation.
+        """
         client = await self._get_client()
         full_key = f"{self._key_prefix}{key}"
+
+        if owner_token is not None:
+            raw = await client.get(full_key)
+            if raw:
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
+                try:
+                    record = json.loads(raw)
+                    # If key was claimed by another worker after lock expiration, do not overwrite
+                    if record.get("status") == "PENDING" and record.get("owner_token") != owner_token:
+                        return
+                except Exception:
+                    pass
+
         completed_data = json.dumps({
             "status": "COMPLETED",
             "payload_hash": payload_hash,
             "result": result,
+            "owner_token": owner_token,
             "created_at": time.time(),
         }, default=str)
         await client.set(full_key, completed_data, ex=int(self._ttl))
 
-    async def release(self, key: str) -> None:
-        """Deletes pending reservation key if tool execution failed."""
+    async def release(self, key: str, owner_token: str | None = None) -> None:
+        """
+        Deletes pending reservation key if tool execution failed.
+        Guarantees lock ownership: only deletes if the lock still belongs to owner_token,
+        preventing an expired or slow worker from releasing another worker's new lock.
+        """
         client = await self._get_client()
         full_key = f"{self._key_prefix}{key}"
         raw = await client.get(full_key)
@@ -498,7 +567,8 @@ class RedisIdempotencyBackend:
             try:
                 record = json.loads(raw)
                 if record.get("status") == "PENDING":
-                    await client.delete(full_key)
+                    if owner_token is None or record.get("owner_token") is None or record.get("owner_token") == owner_token:
+                        await client.delete(full_key)
             except Exception:
                 pass
 

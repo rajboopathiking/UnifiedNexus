@@ -32,6 +32,7 @@ class NexusContext:
     metadata: Dict[str, Any] = field(default_factory=dict)
     start_time: float = field(default_factory=time.perf_counter)
     duration_ms: Optional[float] = None
+    idempotency_key: Optional[str] = None
 
     def mark_completed(self) -> float:
         """Calculates and records execution duration in milliseconds."""
@@ -41,3 +42,16 @@ class NexusContext:
     def has_permission(self, perm: str) -> bool:
         """Checks if a specific permission claim is present."""
         return perm in self.permissions or "admin" in self.permissions or "*" in self.permissions
+
+    @property
+    def durable_idempotency_key(self) -> Optional[str]:
+        """
+        Returns a qualified durable idempotency key formatted as
+        '{caller_id}:{tool_name}:{idempotency_key}' for use in downstream business-level
+        idempotency mechanisms (e.g. database transactions, payment gateway headers).
+        """
+        if not self.idempotency_key:
+            return None
+        from unified_nexus.security import compute_caller_identity
+        caller = compute_caller_identity(self.principal)
+        return f"{caller}:{self.tool_name}:{self.idempotency_key}"
