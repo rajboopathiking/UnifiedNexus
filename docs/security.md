@@ -103,6 +103,8 @@ nexus = UnifiedNexus(
 
 To protect against agent prompt-injection and caller argument tampering:
 - **No Caller-Controlled Role Arguments**: Tool parameters named `role`, `caller_role`, `user_id`, or `principal` are **never** trusted for authorization.
+- **Native Scope Enforcement**: When tools declare `scopes=["orders:read", "orders:cancel"]`, UnifiedNexus natively verifies that the caller's trusted `ctx.permissions` satisfies all declared scopes (`set(scopes).issubset(ctx.permissions)`). If the caller lacks any declared scope, the request immediately fails closed with `AuthorizationError` without requiring a custom `authorize_hook`.
+- **Privileged Identity Rejection**: Privileged operations (`roles`, `scopes`, `requires_approval`, or `ToolSafetyLevel.DESTRUCTIVE`) reject unauthenticated callers (`ctx.principal is None`), preventing them from falling back to the shared `"anonymous"` partition.
 - **FastMCP Claims Extraction**: When an agent connects using FastMCP authentication, UnifiedNexus automatically extracts token claims (`subject`, `client_id`, `scopes`, and `roles`) into `ctx.principal` and `ctx.permissions`.
 - **FastAPI Request State Extraction**: For REST invocations, `request.state.user` and `request.state.permissions` are automatically propagated into `ctx.principal` and `ctx.permissions`.
 - **Authorization Hooks**: Applications can supply a custom `authorize_hook(ctx, tool_name, kwargs, roles, scopes)` for fine-grained policy validation.

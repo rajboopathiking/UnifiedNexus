@@ -5,6 +5,7 @@ Enforces parameter safety, tool classification, secret redaction, and bounded I/
 
 import asyncio
 import hashlib
+import inspect
 import json
 import re
 import time
@@ -20,6 +21,7 @@ except ImportError:
     SecurityParam = DependsParam  # Fallback if older FastAPI
 
 from unified_nexus.exceptions import (
+    AuthorizationError,
     IdempotencyConflictError,
     PayloadTooLargeError,
     SecurityConfigurationError,
@@ -165,12 +167,17 @@ def compute_payload_hash(kwargs: dict[str, Any]) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def compute_caller_identity(principal: Any) -> str:
+def compute_caller_identity(principal: Any, require_authenticated: bool = False) -> str:
     """
     Computes a stable string representation of verified caller identity/tenant.
     Ensures idempotency keys are strictly isolated per tenant/user.
+    If require_authenticated is True and principal is None, raises AuthorizationError.
     """
     if principal is None:
+        if require_authenticated:
+            raise AuthorizationError(
+                "Unauthorized: Authenticated identity required for privileged operation."
+            )
         return "anonymous"
     if isinstance(principal, (str, int, float, bool)):
         return str(principal)
@@ -361,4 +368,147 @@ class IdempotencyCache:
 
     def clear(self) -> None:
         self._cache.clear()
+
+
+class RedisIdempotencyBackend:
+    """
+    Distributed Redis-backed storage for idempotency deduplication.
+    Adheres to BaseIdempotencyBackend protocol.
+    Supports multi-worker Uvicorn / Gunicorn clusters with atomic locking (SET NX EX),
+    deterministic SHA-256 payload conflict detection, automatic TTL expiration,
+    and non-blocking polling for in-flight concurrent operations.
+    """
+
+    def __init__(
+        self,
+        redis_client: Any = None,
+        redis_url: str | None = None,
+        key_prefix: str = "nexus:idempotency:",
+        ttl_seconds: float = 3600.0,
+        lock_timeout: float = 60.0,
+        poll_interval: float = 0.05,
+    ):
+        self._client = redis_client
+        self._redis_url = redis_url
+        self._key_prefix = key_prefix
+        self._ttl = ttl_seconds
+        self._lock_timeout = lock_timeout
+        self._poll_interval = poll_interval
+
+    async def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        if self._redis_url:
+            try:
+                import redis.asyncio as aioredis  # type: ignore
+
+                self._client = aioredis.from_url(self._redis_url)
+                return self._client
+            except ImportError as e:
+                raise ImportError(
+                    "The 'redis' package is required to connect to redis_url. "
+                    "Install it via 'pip install redis'."
+                ) from e
+        raise ValueError(
+            "RedisIdempotencyBackend requires either 'redis_client' or 'redis_url' to be configured."
+        )
+
+    async def acquire_or_get(
+        self, key: str, payload_hash: str, wait_timeout: float = 30.0
+    ) -> tuple[str, Any]:
+        """
+        Atomically inspects and reserves an idempotency key in Redis.
+        Returns:
+            ("CACHED", result): Key was previously completed; returns cached result.
+            ("ACQUIRED", None): Key reserved; caller must proceed with execution.
+            ("CONFLICT", None): Key exists with differing payload_hash.
+            ("TIMEOUT", None): Timed out waiting for an in-flight operation.
+        """
+        client = await self._get_client()
+        full_key = f"{self._key_prefix}{key}"
+        now = time.time()
+        deadline = now + wait_timeout
+
+        pending_data = json.dumps({
+            "status": "PENDING",
+            "payload_hash": payload_hash,
+            "created_at": now,
+        })
+
+        # Atomic reservation via SET NX EX
+        acquired = await client.set(full_key, pending_data, nx=True, ex=int(self._lock_timeout))
+        if acquired:
+            return "ACQUIRED", None
+
+        # Key already exists: inspect status or poll for completion
+        while True:
+            raw = await client.get(full_key)
+            if not raw:
+                # Key was deleted (e.g. concurrent execution failed/released lock or expired)
+                acquired = await client.set(full_key, pending_data, nx=True, ex=int(self._lock_timeout))
+                if acquired:
+                    return "ACQUIRED", None
+                await asyncio.sleep(self._poll_interval)
+                if time.time() >= deadline:
+                    return "TIMEOUT", None
+                continue
+
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+
+            try:
+                record = json.loads(raw)
+            except Exception:
+                return "CONFLICT", None
+
+            existing_hash = record.get("payload_hash")
+            if existing_hash and existing_hash != payload_hash:
+                return "CONFLICT", None
+
+            status = record.get("status")
+            if status == "COMPLETED":
+                return "CACHED", record.get("result")
+
+            # Still PENDING: wait for completion
+            if time.time() >= deadline:
+                return "TIMEOUT", None
+
+            await asyncio.sleep(self._poll_interval)
+
+    async def complete(self, key: str, payload_hash: str, result: Any) -> None:
+        """Stores completed result with full TTL in Redis."""
+        client = await self._get_client()
+        full_key = f"{self._key_prefix}{key}"
+        completed_data = json.dumps({
+            "status": "COMPLETED",
+            "payload_hash": payload_hash,
+            "result": result,
+            "created_at": time.time(),
+        }, default=str)
+        await client.set(full_key, completed_data, ex=int(self._ttl))
+
+    async def release(self, key: str) -> None:
+        """Deletes pending reservation key if tool execution failed."""
+        client = await self._get_client()
+        full_key = f"{self._key_prefix}{key}"
+        raw = await client.get(full_key)
+        if raw:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            try:
+                record = json.loads(raw)
+                if record.get("status") == "PENDING":
+                    await client.delete(full_key)
+            except Exception:
+                pass
+
+    async def close(self) -> None:
+        """Closes the underlying Redis connection if supported."""
+        if self._client is not None and hasattr(self._client, "aclose"):
+            await self._client.aclose()
+        elif self._client is not None and hasattr(self._client, "close"):
+            res = self._client.close()
+            if inspect.iscoroutine(res):
+                await res
+
 

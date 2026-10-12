@@ -19,7 +19,11 @@ from unified_nexus.exceptions import (
     UnifiedNexusError,
 )
 from unified_nexus.plugins import NexusPlugin, PluginManager
-from unified_nexus.security import BaseIdempotencyBackend, IdempotencyCache
+from unified_nexus.security import (
+    BaseIdempotencyBackend,
+    IdempotencyCache,
+    RedisIdempotencyBackend,
+)
 from unified_nexus.unified_nexus import (
     ExposureMode,
     ToolSafetyLevel,
@@ -42,6 +46,7 @@ __all__ = [
     "PayloadTooLargeError",
     "PluginManager",
     "RateLimitExceededError",
+    "RedisIdempotencyBackend",
     "SecurityConfigurationError",
     "ToolSafetyLevel",
     "ToolTimeoutError",

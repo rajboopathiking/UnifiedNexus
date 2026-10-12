@@ -298,6 +298,15 @@ class UnifiedNexus:
                             f"Unauthorized: Caller lacks required role in trusted context: {roles}"
                         )
 
+            if scopes:
+                # Require declared scopes against verified permissions in ctx.permissions (fail-closed)
+                if not set(scopes).issubset(ctx.permissions):
+                    if not self.authorize_hook:
+                        missing = sorted(list(set(scopes) - ctx.permissions))
+                        raise AuthorizationError(
+                            f"Unauthorized: Caller lacks required scopes in trusted context: {missing}"
+                        )
+
             # 6. Human approval check for sensitive / destructive operations (TRUSTED PROOF ONLY)
             needs_approval = requires_approval or (tool_type == ToolSafetyLevel.DESTRUCTIVE)
             if needs_approval:
@@ -328,7 +337,7 @@ class UnifiedNexus:
                         f"Action '{tool_name}' is classified as {tool_type.value} and requires human approval."
                     )
 
-            # 6. Multi-tenant atomic idempotency deduplication (POST-AUTHORIZATION ONLY)
+            # 7. Multi-tenant atomic idempotency deduplication (POST-AUTHORIZATION ONLY)
             idem_key = (
                 kwargs.get("idempotency_key")
                 or kwargs.get("idempotent_key")
@@ -347,6 +356,19 @@ class UnifiedNexus:
             acquired_idempotency = False
 
             if idempotent and idem_key:
+                # Reject unauthenticated/missing identities for privileged tools rather than
+                # using the shared "anonymous" fallback partition.
+                is_privileged = bool(
+                    roles
+                    or scopes
+                    or requires_approval
+                    or tool_type == ToolSafetyLevel.DESTRUCTIVE
+                )
+                if is_privileged and ctx.principal is None:
+                    raise AuthorizationError(
+                        f"Unauthorized: Authenticated identity required for privileged idempotent tool '{tool_name}'."
+                    )
+
                 caller_id = compute_caller_identity(ctx.principal)
                 payload_hash = compute_payload_hash(kwargs)
                 cache_key = f"{caller_id}:{tool_name}:{idem_key}"
@@ -389,9 +411,11 @@ class UnifiedNexus:
                     except (TimeoutError, asyncio.TimeoutError):
                         if not inspect.iscoroutinefunction(func):
                             logger.warning(
-                                f"[{ctx.request_id}] Synchronous tool '{tool_name}' timed out after {effective_timeout}s. "
-                                f"Worker thread will run to completion. Note: Define side-effecting operations as async "
-                                f"to support immediate task cancellation."
+                                f"[{ctx.request_id}] Operational Warning: Synchronous tool '{tool_name}' "
+                                f"(type={tool_type.value}) timed out after {effective_timeout}s. "
+                                f"Worker thread will continue running to completion in thread pool. "
+                                f"For side-effecting operations (ACTION/DESTRUCTIVE), use 'async def' "
+                                f"to support immediate task cancellation, or employ distributed idempotency."
                             )
                         raise
 
@@ -748,6 +772,15 @@ class UnifiedNexus:
             sig = inspect.signature(func)
             actual_path = path or f"/{func.__name__}"
             tool_name = name or func.__name__
+
+            if safety_level == ToolSafetyLevel.DESTRUCTIVE and not inspect.iscoroutinefunction(func):
+                logger.warning(
+                    f"Tool '{tool_name}' is classified as DESTRUCTIVE but implemented as a synchronous function. "
+                    f"In Python, timed-out threadpool worker threads continue running in the background. "
+                    f"It is strongly recommended to define DESTRUCTIVE tools using 'async def' to support "
+                    f"prompt task cancellation and prevent orphaned state mutations on timeout."
+                )
+
             tool_doc = description or (
                 func.__doc__.strip().split("\n")[0]
                 if func.__doc__ else None

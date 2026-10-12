@@ -74,16 +74,30 @@ The cache binds each key to a SHA-256 hash of the request parameters. Reusing an
 ### D. Atomic In-Flight Locking
 If multiple concurrent requests arrive with the identical idempotency key and payload, UnifiedNexus atomically reserves the key. The first request executes the side effect while concurrent callers await completion, guaranteeing the tool executes **exactly once**.
 
-### E. In-Memory and Distributed Backends
-UnifiedNexus ships with an async/thread-safe in-memory `IdempotencyCache` and defines a standard `BaseIdempotencyBackend` protocol:
-```python
-from unified_nexus import UnifiedNexus, IdempotencyCache, BaseIdempotencyBackend
+### E. In-Memory and Distributed Backends (`RedisIdempotencyBackend`)
+UnifiedNexus ships with an async/thread-safe in-memory `IdempotencyCache` and a distributed `RedisIdempotencyBackend` conforming to `BaseIdempotencyBackend`:
 
-# Default built-in in-memory cache (with TTL & LRU eviction)
+```python
+from unified_nexus import UnifiedNexus, IdempotencyCache, RedisIdempotencyBackend
+
+# 1. Single-worker / Local development (built-in in-memory cache with TTL & LRU eviction)
 cache = IdempotencyCache(ttl_seconds=3600.0, maxsize=1000)
-nexus = UnifiedNexus("ProductionApp", idempotency_backend=cache)
+nexus = UnifiedNexus("SingleWorkerApp", idempotency_backend=cache)
+
+# 2. Multi-worker production clusters (e.g. Uvicorn with multiple workers or Kubernetes pods)
+import redis.asyncio as aioredis
+redis_client = aioredis.from_url("redis://localhost:6379/0")
+redis_backend = RedisIdempotencyBackend(redis_client=redis_client, ttl_seconds=3600.0)
+
+nexus_cluster = UnifiedNexus("ProductionClusterApp", idempotency_backend=redis_backend)
 ```
-For multi-worker deployments (e.g. multiple Uvicorn workers behind a reverse proxy), plug in a custom `BaseIdempotencyBackend` (e.g., Redis).
+
+`RedisIdempotencyBackend` utilizes Redis `SET key value NX EX` for atomic locking across multiple workers, supports non-blocking polling while in-flight operations complete, detects payload conflicts, and automatically purges abandoned locks on execution failure.
+
+### F. Privileged Tool Identity Isolation
+For tools declared with `roles`, `scopes`, `requires_approval`, or classified as `ToolSafetyLevel.DESTRUCTIVE`:
+- UnifiedNexus strictly **rejects** unauthenticated callers (`ctx.principal is None`) with `AuthorizationError`.
+- Privileged operations never fall back to the shared `"anonymous"` cache partition, completely preventing cross-tenant and unauthenticated idempotency key hijacking.
 
 ---
 
@@ -119,8 +133,11 @@ async def compute(matrix_id: str):
 
 In async frameworks, long-running synchronous functions block the entire event loop. UnifiedNexus automatically executes sync tools inside Starlette's `run_in_threadpool`, ensuring async endpoints and MCP heartbeats remain responsive.
 
-> [!TIP]
-> **Async Recommendation for Side-Effecting Operations**:
-> When a timeout fires on an `async def` tool, Python cancels the coroutine immediately. However, synchronous functions running inside worker threads cannot be forcefully killed by the OS.
-> For operations with external side-effects (e.g. payment processing, email delivery, or database mutations), **prefer `async def`** so that timeouts immediately halt execution.
+> [!WARNING]
+> **Operational Risk for Synchronous Destructive Operations**:
+> When a timeout occurs on an `async def` tool, Python cancels the coroutine immediately. However, synchronous functions running inside worker threads continue running in the background until completion.
+> 
+> - UnifiedNexus logs a startup warning whenever a `DESTRUCTIVE` tool is registered synchronously.
+> - On timeout, UnifiedNexus emits an explicit operational warning.
+> - **Best Practice**: Always define state-modifying tools (`ACTION` and `DESTRUCTIVE`) using `async def`, or pair them with distributed idempotency locks (`RedisIdempotencyBackend`) to prevent duplicate execution during recovery.
 

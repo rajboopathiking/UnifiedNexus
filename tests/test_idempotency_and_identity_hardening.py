@@ -101,6 +101,12 @@ async def test_human_approval_enforced_before_idempotency_cache():
 
     nexus.approval_hook = approval_check
 
+    class MockOperatorPlugin(NexusPlugin):
+        async def before_execute(self, ctx: NexusContext, kwargs: dict):
+            ctx.principal = "admin_operator"
+
+    nexus.add_plugin(MockOperatorPlugin())
+
     @nexus.universal_tool(
         tool_type=ToolSafetyLevel.DESTRUCTIVE,
         requires_approval=True,
@@ -256,4 +262,176 @@ async def test_fastmcp_claims_and_permissions_propagation():
         tool = await nexus.mcp.get_tool("approve_budget")
         result = extract_result(await tool.run({"department": "Engineering"}))
         assert result == {"approved": "Engineering"}
+
+
+@pytest.mark.asyncio
+async def test_native_scope_enforcement_fail_closed():
+    """
+    Asserts that declared scopes are natively enforced fail-closed against verified caller
+    permissions in ctx.permissions without requiring an application authorize_hook.
+    """
+    nexus = UnifiedNexus("ScopeApp")
+
+    @nexus.universal_tool(scopes=["orders:write", "orders:cancel"])
+    def cancel_order(order_id: str):
+        return {"status": "cancelled", "order_id": order_id}
+
+    class ScopeInjectorPlugin(NexusPlugin):
+        def __init__(self, permissions: set[str]):
+            self.permissions = permissions
+
+        async def before_execute(self, ctx: NexusContext, kwargs: dict):
+            ctx.principal = "test_user"
+            ctx.permissions = set(self.permissions)
+
+    # 1. Caller with missing scope ('orders:cancel') is rejected fail-closed
+    injector = ScopeInjectorPlugin(permissions={"orders:write"})
+    nexus.add_plugin(injector)
+
+    tool = await nexus.mcp.get_tool("cancel_order")
+    with pytest.raises(ToolError) as exc_missing:
+        await tool.run({"order_id": "ord_101"})
+    assert "Caller lacks required scopes in trusted context" in str(exc_missing.value)
+    assert "orders:cancel" in str(exc_missing.value)
+
+    # 2. Caller with all declared scopes is permitted
+    injector.permissions = {"orders:write", "orders:cancel", "audit:log"}
+    res_ok = extract_result(await tool.run({"order_id": "ord_101"}))
+    assert res_ok == {"status": "cancelled", "order_id": "ord_101"}
+
+
+@pytest.mark.asyncio
+async def test_privileged_idempotent_tool_rejects_missing_identity():
+    """
+    Asserts that privileged tools (roles, scopes, approval, destructive) reject
+    unauthenticated/missing identities (ctx.principal is None) rather than falling back
+    to the shared 'anonymous' cache partition.
+    """
+    nexus = UnifiedNexus("PrivilegedIdentityApp")
+
+    @nexus.universal_tool(
+        scopes=["payments:execute"],
+        idempotent=True,
+    )
+    def execute_payment(account: str, amount: int, idempotency_key: str):
+        return {"account": account, "amount": amount, "tx": "tx_999"}
+
+    tool = await nexus.mcp.get_tool("execute_payment")
+
+    # 1. Unauthenticated invocation (ctx.principal is None, no scopes)
+    with pytest.raises(ToolError) as exc:
+        await tool.run({"account": "acc_1", "amount": 500, "idempotency_key": "pay_key_1"})
+    assert "Unauthorized" in str(exc.value)
+
+    # 2. Authenticated invocation with valid principal and scope succeeds and partitions by identity
+    class AuthPaymentPlugin(NexusPlugin):
+        async def before_execute(self, ctx: NexusContext, kwargs: dict):
+            ctx.principal = "merchant_user_77"
+            ctx.permissions.add("payments:execute")
+
+    nexus.add_plugin(AuthPaymentPlugin())
+    res = extract_result(await tool.run({"account": "acc_1", "amount": 500, "idempotency_key": "pay_key_1"}))
+    assert res["tx"] == "tx_999"
+
+
+class MockAsyncRedis:
+    """Mock async Redis client implementing get, set(nx, ex), delete, and aclose."""
+
+    def __init__(self):
+        self.store: dict[str, str] = {}
+        self.expirations: dict[str, int] = {}
+
+    async def get(self, key: str):
+        return self.store.get(key)
+
+    async def set(self, key: str, value: str, nx: bool = False, ex: int | None = None):
+        if nx and key in self.store:
+            return False
+        self.store[key] = value
+        if ex:
+            self.expirations[key] = ex
+        return True
+
+    async def delete(self, key: str):
+        if key in self.store:
+            del self.store[key]
+            return 1
+        return 0
+
+    async def aclose(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_redis_idempotency_backend_lifecycle_and_conflict():
+    """
+    Validates RedisIdempotencyBackend adheres to BaseIdempotencyBackend protocol
+    and accurately executes atomic reservations, cached returns, payload hashing, and release.
+    """
+    from unified_nexus import BaseIdempotencyBackend, RedisIdempotencyBackend
+
+    mock_redis = MockAsyncRedis()
+    backend = RedisIdempotencyBackend(redis_client=mock_redis, ttl_seconds=300.0, lock_timeout=30.0)
+    assert isinstance(backend, BaseIdempotencyBackend)
+
+    # 1. Initial acquire
+    status1, val1 = await backend.acquire_or_get("test_key", "hash_alpha")
+    assert status1 == "ACQUIRED"
+    assert val1 is None
+
+    # 2. Complete with result
+    await backend.complete("test_key", "hash_alpha", {"charge": 100})
+
+    # 3. Subsequent acquire returns cached result
+    status2, val2 = await backend.acquire_or_get("test_key", "hash_alpha")
+    assert status2 == "CACHED"
+    assert val2 == {"charge": 100}
+
+    # 4. Same key with different payload hash triggers CONFLICT
+    status3, val3 = await backend.acquire_or_get("test_key", "hash_different")
+    assert status3 == "CONFLICT"
+    assert val3 is None
+
+    # 5. Acquire another key and release on failure
+    status4, _ = await backend.acquire_or_get("failing_key", "hash_gamma")
+    assert status4 == "ACQUIRED"
+    await backend.release("failing_key")
+
+    # Retry can re-acquire after release
+    status5, _ = await backend.acquire_or_get("failing_key", "hash_gamma")
+    assert status5 == "ACQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_unified_nexus_with_redis_idempotency_backend():
+    """
+    Asserts that UnifiedNexus integrates cleanly with RedisIdempotencyBackend,
+    deduplicating tool runs through the distributed backend.
+    """
+    from unified_nexus import RedisIdempotencyBackend
+
+    mock_redis = MockAsyncRedis()
+    redis_backend = RedisIdempotencyBackend(redis_client=mock_redis)
+
+    nexus = UnifiedNexus("RedisNexusApp", idempotency_backend=redis_backend)
+    exec_count = 0
+
+    @nexus.universal_tool(idempotent=True)
+    def process_order(item: str, idempotency_key: str):
+        nonlocal exec_count
+        exec_count += 1
+        return {"item": item, "exec_count": exec_count}
+
+    tool = await nexus.mcp.get_tool("process_order")
+
+    # 1. First execution
+    res1 = extract_result(await tool.run({"item": "laptop", "idempotency_key": "order_idem_1"}))
+    assert exec_count == 1
+    assert res1["exec_count"] == 1
+
+    # 2. Second execution returns response from Redis backend cache without re-executing
+    res2 = extract_result(await tool.run({"item": "laptop", "idempotency_key": "order_idem_1"}))
+    assert exec_count == 1
+    assert res2["exec_count"] == 1
+
 
