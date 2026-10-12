@@ -56,14 +56,34 @@ nexus = UnifiedNexus("DestructiveService", approval_hook=verify_approval)
 
 AI agents frequently encounter transport timeouts or parse errors, leading to automated retries. Tools decorated with `idempotent=True` publish schema annotations signaling to LLM hosts that repeated calls with the same arguments will not produce duplicate side effects.
 
-Furthermore, UnifiedNexus provides an in-memory, thread-safe `IdempotencyCache` with TTL and LRU eviction:
-```python
-from unified_nexus import IdempotencyCache
+Furthermore, UnifiedNexus provides enterprise-grade idempotency deduplication with multi-tenant isolation, cryptographic payload validation, and atomic concurrency locking:
 
-cache = IdempotencyCache(ttl_seconds=300.0, max_entries=1000)
-nexus = UnifiedNexus("Api", idempotency_cache=cache)
+### A. Strict Post-Authorization Enforcement
+The idempotency cache is **never** queried before rate limiting, execution-time authorization, and human approvals pass. Unauthenticated or unauthorized callers cannot access cached outputs by guessing or reusing an authorized caller's idempotency key.
+
+### B. Multi-Tenant Key Isolation
+Cache keys are automatically partitioned by the caller's verified identity:
 ```
-When an agent calls an idempotent tool with an `idempotency_key`, UnifiedNexus caches the returned response. Identical subsequent calls return the cached response without re-executing business logic or creating duplicate side effects.
+cache_key = f"{caller_identity}:{tool_name}:{idempotency_key}"
+```
+Two distinct tenants or users submitting the same idempotency key are completely isolated and cannot read or overwrite each other's data.
+
+### C. Cryptographic Payload Binding
+The cache binds each key to a SHA-256 hash of the request parameters. Reusing an existing idempotency key with different arguments raises `IdempotencyConflictError` (HTTP 409 on REST, `ToolError` on MCP).
+
+### D. Atomic In-Flight Locking
+If multiple concurrent requests arrive with the identical idempotency key and payload, UnifiedNexus atomically reserves the key. The first request executes the side effect while concurrent callers await completion, guaranteeing the tool executes **exactly once**.
+
+### E. In-Memory and Distributed Backends
+UnifiedNexus ships with an async/thread-safe in-memory `IdempotencyCache` and defines a standard `BaseIdempotencyBackend` protocol:
+```python
+from unified_nexus import UnifiedNexus, IdempotencyCache, BaseIdempotencyBackend
+
+# Default built-in in-memory cache (with TTL & LRU eviction)
+cache = IdempotencyCache(ttl_seconds=3600.0, maxsize=1000)
+nexus = UnifiedNexus("ProductionApp", idempotency_backend=cache)
+```
+For multi-worker deployments (e.g. multiple Uvicorn workers behind a reverse proxy), plug in a custom `BaseIdempotencyBackend` (e.g., Redis).
 
 ---
 
@@ -95,6 +115,12 @@ async def compute(matrix_id: str):
 
 ---
 
-## 6. Non-Blocking Sync Execution
+## 6. Non-Blocking Sync Execution & Timeout Considerations
 
 In async frameworks, long-running synchronous functions block the entire event loop. UnifiedNexus automatically executes sync tools inside Starlette's `run_in_threadpool`, ensuring async endpoints and MCP heartbeats remain responsive.
+
+> [!TIP]
+> **Async Recommendation for Side-Effecting Operations**:
+> When a timeout fires on an `async def` tool, Python cancels the coroutine immediately. However, synchronous functions running inside worker threads cannot be forcefully killed by the OS.
+> For operations with external side-effects (e.g. payment processing, email delivery, or database mutations), **prefer `async def`** so that timeouts immediately halt execution.
+

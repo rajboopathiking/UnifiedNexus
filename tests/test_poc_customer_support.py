@@ -163,10 +163,10 @@ def test_customer_support_scenarios_over_rest():
         assert res_create1.status_code == 200
         assert res_create1.json()["status"] == "created"
 
-        # Idempotent retry: same key returns existing ticket
+        # Idempotent retry: same key returns existing ticket without duplicating
         res_create2 = client.post("/tickets/create", json=payload)
         assert res_create2.status_code == 200
-        assert res_create2.json()["status"] == "existing"
+        assert res_create2.json()["ticket"]["ticket_id"] == res_create1.json()["ticket"]["ticket_id"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -210,9 +210,9 @@ async def test_customer_support_scenarios_over_mcp():
         ticket_res1 = await ticket_tool.run(ticket_data)
         assert "created" in str(ticket_res1)
 
-        # Idempotent retry returns existing
+        # Idempotent retry returns existing ticket without duplicating
         ticket_res2 = await ticket_tool.run(ticket_data)
-        assert "existing" in str(ticket_res2)
+        assert "TCK-1001" in str(ticket_res2)
 
         # Audit logs recorded all MCP operations
         mcp_audit_tools = [entry["tool"] for entry in AUDIT_LOGS if entry["transport"] == "mcp"]

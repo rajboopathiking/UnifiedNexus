@@ -103,7 +103,9 @@ nexus = UnifiedNexus(
 
 To protect against agent prompt-injection and caller argument tampering:
 - **No Caller-Controlled Role Arguments**: Tool parameters named `role`, `caller_role`, `user_id`, or `principal` are **never** trusted for authorization.
-- **Trusted Context & Authorization Hooks**: Identity and roles must be derived from trusted authentication tokens via `ctx.principal`, `ctx.permissions`, or an explicit `authorize_hook(ctx, tool_name, roles, scopes)`.
+- **FastMCP Claims Extraction**: When an agent connects using FastMCP authentication, UnifiedNexus automatically extracts token claims (`subject`, `client_id`, `scopes`, and `roles`) into `ctx.principal` and `ctx.permissions`.
+- **FastAPI Request State Extraction**: For REST invocations, `request.state.user` and `request.state.permissions` are automatically propagated into `ctx.principal` and `ctx.permissions`.
+- **Authorization Hooks**: Applications can supply a custom `authorize_hook(ctx, tool_name, kwargs, roles, scopes)` for fine-grained policy validation.
 - **Inherited Router Auth**: When `nexus.include_router(router)` is mounted via `attach_to()` or `finalize()`, `rest_auth` dependencies are propagated automatically to all included REST routes.
 - **Fail-Closed Policy**: If any rate limit or authorization hook encounters an error, execution immediately fails closed with `RateLimitExceededError` or `AuthorizationError`.
 

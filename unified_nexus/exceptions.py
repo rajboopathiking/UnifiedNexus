@@ -48,3 +48,7 @@ class PayloadTooLargeError(UnifiedNexusError):
 
 class RateLimitExceededError(UnifiedNexusError):
     """Raised when tool invocation exceeds the configured rate limit."""
+
+
+class IdempotencyConflictError(UnifiedNexusError):
+    """Raised when an idempotency key is reused with differing request parameters or concurrent conflict occurs."""

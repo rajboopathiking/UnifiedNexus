@@ -4,11 +4,13 @@ Enforces parameter safety, tool classification, secret redaction, and bounded I/
 """
 
 import asyncio
+import hashlib
 import json
 import re
 import time
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from fastapi.params import Depends as DependsParam
 
@@ -18,6 +20,7 @@ except ImportError:
     SecurityParam = DependsParam  # Fallback if older FastAPI
 
 from unified_nexus.exceptions import (
+    IdempotencyConflictError,
     PayloadTooLargeError,
     SecurityConfigurationError,
 )
@@ -135,31 +138,226 @@ def bound_output(result: Any, max_chars: int) -> Any:
     return result
 
 
+def compute_payload_hash(kwargs: dict[str, Any]) -> str:
+    """
+    Computes a deterministic SHA-256 hash of tool arguments.
+    Excludes the idempotency key itself and framework-injected Request objects,
+    recursing into Pydantic models when present.
+    """
+    ignored_keys = {"idempotency_key", "idempotent_key", "request"}
+    filtered: dict[str, Any] = {}
+    for k, v in kwargs.items():
+        if k in ignored_keys:
+            continue
+        if hasattr(v, "model_dump") and callable(v.model_dump):
+            dumped = v.model_dump()
+            filtered[k] = {dk: dv for dk, dv in dumped.items() if dk not in ignored_keys}
+        elif hasattr(v, "dict") and callable(v.dict):
+            dumped = v.dict()
+            filtered[k] = {dk: dv for dk, dv in dumped.items() if dk not in ignored_keys}
+        else:
+            filtered[k] = v
+
+    try:
+        serialized = json.dumps(filtered, sort_keys=True, default=str)
+    except Exception:
+        serialized = str(sorted((str(k), str(v)) for k, v in filtered.items()))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def compute_caller_identity(principal: Any) -> str:
+    """
+    Computes a stable string representation of verified caller identity/tenant.
+    Ensures idempotency keys are strictly isolated per tenant/user.
+    """
+    if principal is None:
+        return "anonymous"
+    if isinstance(principal, (str, int, float, bool)):
+        return str(principal)
+    if isinstance(principal, dict):
+        tenant = principal.get("tenant_id") or principal.get("org_id")
+        user = principal.get("user_id") or principal.get("sub") or principal.get("username")
+        if tenant and user:
+            return f"tenant:{tenant}:user:{user}"
+        try:
+            return json.dumps(principal, sort_keys=True)
+        except Exception:
+            return str(principal)
+    return str(principal)
+
+
+@runtime_checkable
+class BaseIdempotencyBackend(Protocol):
+    """Protocol for idempotency storage backends (in-memory or distributed)."""
+
+    async def acquire_or_get(
+        self, key: str, payload_hash: str, wait_timeout: float = 30.0
+    ) -> tuple[str, Any]:
+        """
+        Atomically inspects and reserves an idempotency key.
+        Returns:
+            ("CACHED", result): Key completed; returns cached result without execution.
+            ("ACQUIRED", None): Key reserved; caller must proceed with execution.
+            ("CONFLICT", None): Key exists but payload_hash does not match (tampering / collision).
+            ("TIMEOUT", None): Timed out waiting for an in-flight concurrent execution.
+        """
+        ...
+
+    async def complete(self, key: str, payload_hash: str, result: Any) -> None:
+        """Marks key as completed and stores the result."""
+        ...
+
+    async def release(self, key: str) -> None:
+        """Releases a pending reservation if tool execution fails."""
+        ...
+
+
+@dataclass
+class IdempotencyRecord:
+    status: str  # "PENDING" | "COMPLETED"
+    payload_hash: str
+    created_at: float
+    result: Any = None
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 class IdempotencyCache:
-    """Thread-safe and async-safe in-memory cache for deduplicating idempotent operations."""
+    """
+    Thread-safe and async-safe in-memory cache for deduplicating idempotent operations.
+    Enforces atomic in-flight locking, tenant/identity binding, payload hash validation,
+    and automatic TTL expiration.
+    """
 
     def __init__(self, maxsize: int = 1000, ttl_seconds: float = 3600.0):
-        self._cache: dict[str, tuple[float, Any]] = {}
+        self._cache: dict[str, IdempotencyRecord] = {}
         self._maxsize = maxsize
         self._ttl = ttl_seconds
         self._lock = asyncio.Lock()
 
-    async def get(self, key: str) -> tuple[bool, Any]:
+    def _prune_expired_or_overflow(self) -> None:
+        now = time.time()
+        # Remove expired entries
+        expired_keys = [
+            k for k, rec in self._cache.items()
+            if (now - rec.created_at) > self._ttl and rec.status == "COMPLETED"
+        ]
+        for k in expired_keys:
+            del self._cache[k]
+
+        # If still over maxsize, evict oldest COMPLETED entry
+        if len(self._cache) >= self._maxsize:
+            completed_keys = [
+                k for k, rec in self._cache.items()
+                if rec.status == "COMPLETED"
+            ]
+            if completed_keys:
+                oldest_key = min(completed_keys, key=lambda k: self._cache[k].created_at)
+                del self._cache[oldest_key]
+
+    async def acquire_or_get(
+        self, key: str, payload_hash: str, wait_timeout: float = 30.0
+    ) -> tuple[str, Any]:
+        """
+        Atomically reserves an idempotency key or retrieves the cached result.
+        Returns ("CACHED", result), ("ACQUIRED", None), ("CONFLICT", None), or ("TIMEOUT", None).
+        """
         async with self._lock:
-            if key not in self._cache:
+            now = time.time()
+            record = self._cache.get(key)
+
+            # Check if existing record is expired
+            if record and (now - record.created_at > self._ttl) and record.status == "COMPLETED":
+                del self._cache[key]
+                record = None
+
+            if record is None:
+                self._prune_expired_or_overflow()
+                event = asyncio.Event()
+                self._cache[key] = IdempotencyRecord(
+                    status="PENDING",
+                    payload_hash=payload_hash,
+                    created_at=now,
+                    event=event,
+                )
+                return "ACQUIRED", None
+
+            # Record exists: verify payload hash to prevent key reuse with different parameters
+            if record.payload_hash != payload_hash:
+                return "CONFLICT", None
+
+            if record.status == "COMPLETED":
+                return "CACHED", record.result
+
+            # Record is PENDING (another concurrent request with identical payload is running)
+            event = record.event
+
+        # Wait for the in-flight operation to complete outside the lock
+        try:
+            await asyncio.wait_for(event.wait(), timeout=wait_timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            return "TIMEOUT", None
+
+        # Re-check under lock
+        async with self._lock:
+            rec = self._cache.get(key)
+            if rec and rec.status == "COMPLETED":
+                if rec.payload_hash != payload_hash:
+                    return "CONFLICT", None
+                return "CACHED", rec.result
+
+            # If the concurrent operation failed or cleared without completing, acquire for this caller
+            event = asyncio.Event()
+            self._cache[key] = IdempotencyRecord(
+                status="PENDING",
+                payload_hash=payload_hash,
+                created_at=time.time(),
+                event=event,
+            )
+            return "ACQUIRED", None
+
+    async def complete(self, key: str, payload_hash: str, result: Any) -> None:
+        """Stores the successful result and notifies any awaiting concurrent requests."""
+        async with self._lock:
+            rec = self._cache.get(key)
+            if rec:
+                rec.status = "COMPLETED"
+                rec.result = result
+                rec.payload_hash = payload_hash
+                rec.created_at = time.time()
+                rec.event.set()
+
+    async def release(self, key: str) -> None:
+        """Releases a pending reservation if tool execution fails."""
+        async with self._lock:
+            rec = self._cache.get(key)
+            if rec and rec.status == "PENDING":
+                rec.event.set()
+                del self._cache[key]
+
+    async def get(self, key: str) -> tuple[bool, Any]:
+        """Legacy compatibility lookup."""
+        async with self._lock:
+            rec = self._cache.get(key)
+            if not rec or rec.status != "COMPLETED":
                 return False, None
-            ts, val = self._cache[key]
-            if time.time() - ts > self._ttl:
+            if time.time() - rec.created_at > self._ttl:
                 del self._cache[key]
                 return False, None
-            return True, val
+            return True, rec.result
 
-    async def set(self, key: str, value: Any) -> None:
+    async def set(self, key: str, value: Any, payload_hash: str = "") -> None:
+        """Legacy compatibility setter."""
         async with self._lock:
-            if len(self._cache) >= self._maxsize:
-                oldest_key = min(self._cache, key=lambda k: self._cache[k][0])
-                del self._cache[oldest_key]
-            self._cache[key] = (time.time(), value)
+            self._prune_expired_or_overflow()
+            event = asyncio.Event()
+            event.set()
+            self._cache[key] = IdempotencyRecord(
+                status="COMPLETED",
+                payload_hash=payload_hash,
+                created_at=time.time(),
+                result=value,
+                event=event,
+            )
 
     def clear(self) -> None:
         self._cache.clear()

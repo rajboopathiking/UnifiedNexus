@@ -15,11 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Strict policy parity: timeout cancellation, concurrency semaphores, rate limiting, bounded input/output, and human approval verification enforced equally across both transports.
 - **Fail-Closed Authorization & Anti-Spoofing**:
   - Complete elimination of caller-controlled role arguments (`role`, `caller_role`, `user_id`, `principal`) from authorization decisions. Caller identity is exclusively derived from verified token context (`ctx.principal`, `ctx.permissions`) or an application `authorize_hook`.
+  - Automatic extraction of FastMCP authenticated token claims (`subject`, `client_id`, `scopes`, `roles`) and FastAPI `request.state.user` / `request.state.permissions` into `NexusContext`.
   - Blocked `__approved__=True` backdoor; destructive actions unconditionally require a registered application `approval_hook`.
   - Rate limiting hooks fail closed (`RateLimitExceededError`) on any hook exceptions.
   - Router-level security dependencies (`rest_auth`) automatically propagate to included routers in both `attach_to()` and `finalize()`.
-- **In-Memory Idempotency Deduplication**:
-  - `IdempotencyCache` for thread-safe caching of idempotent tool calls by `tool_name:idempotency_key` with configurable TTL and LRU eviction, preventing duplicate AI-agent side effects on retries.
+- **Multi-Tenant & Atomic Idempotency Deduplication**:
+  - Strict post-authorization execution: idempotency cache is never queried before rate limiting, authorization, and human approvals pass.
+  - Tenant and user identity partitioning: cache keys are scoped to caller (`caller_id:tool_name:idem_key`), preventing cross-user data leakage.
+  - Cryptographic payload binding: SHA-256 hash validation of arguments detects parameter tampering and raises `IdempotencyConflictError` (HTTP 409 / ToolError).
+  - Atomic in-flight concurrency reservation: concurrent duplicate requests await the active execution and return the cached response, ensuring side effects run **exactly once**.
+  - `BaseIdempotencyBackend` protocol and `idempotency_backend` parameter supporting distributed caches (Redis) alongside the built-in in-memory `IdempotencyCache`.
 - **Plugin Architecture & Lifecycle Hooks**:
   - `NexusPlugin` protocol with `startup()`, `before_execute()`, `after_execute()`, `on_error()`, and `shutdown()`.
   - `nexus.add_plugin(plugin)` for intercepting both REST and MCP requests with a single plugin.
@@ -38,13 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Idempotency declaration (`idempotent=True`) for safe AI agent retries on side-effecting operations.
   - Bounded input string sizes (`max_input_chars`) and safe output truncation (`max_output_chars`).
   - Concurrency limiting via `asyncio.Semaphore` and configurable per-tool timeouts.
-  - Non-blocking execution of synchronous tools in Starlette's threadpool (`run_in_threadpool`).
+  - Non-blocking execution of synchronous tools in Starlette's threadpool (`run_in_threadpool`) with operational warnings on sync timeout.
 - **MCP Transport Normalization**:
   - Normalization of external mount paths eliminating `/mcp/mcp` duplication across both `/` and `/mcp` mounts.
   - Strict preservation of parent FastAPI lifespans (executing exactly once on startup and shutdown).
   - Single ASGI sub-application reuse across both mounting and lifespan context management.
 - **Testing & Quality**:
-  - 48 automated unit, integration, and security regression tests passing with 100% pass rate.
+  - 54 automated unit, integration, and security regression tests passing with 100% pass rate.
   - Full GitHub Actions CI workflow (`.github/workflows/ci.yml`) testing Python 3.11 and 3.12, linting with Ruff, building distribution, and validating wheel install.
   - End-to-end AI Customer Support Agent proof-of-concept testing three realistic scenarios across REST and MCP.
 

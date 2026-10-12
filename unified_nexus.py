@@ -11,6 +11,7 @@ from unified_nexus.exceptions import (
     DuplicateRouteError,
     DuplicateToolError,
     HumanApprovalRequiredError,
+    IdempotencyConflictError,
     PayloadTooLargeError,
     RateLimitExceededError,
     SecurityConfigurationError,
@@ -18,7 +19,7 @@ from unified_nexus.exceptions import (
     UnifiedNexusError,
 )
 from unified_nexus.plugins import NexusPlugin, PluginManager
-from unified_nexus.security import IdempotencyCache
+from unified_nexus.security import BaseIdempotencyBackend, IdempotencyCache
 from unified_nexus.unified_nexus import (
     ExposureMode,
     ToolSafetyLevel,
@@ -28,12 +29,14 @@ from unified_nexus.unified_nexus import (
 
 __all__ = [
     "AuthorizationError",
+    "BaseIdempotencyBackend",
     "ConcurrencyLimitError",
     "DuplicateRouteError",
     "DuplicateToolError",
     "ExposureMode",
     "HumanApprovalRequiredError",
     "IdempotencyCache",
+    "IdempotencyConflictError",
     "NexusContext",
     "NexusPlugin",
     "PayloadTooLargeError",

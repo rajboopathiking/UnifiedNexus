@@ -35,6 +35,7 @@ from unified_nexus.exceptions import (
     DuplicateRouteError,
     DuplicateToolError,
     HumanApprovalRequiredError,
+    IdempotencyConflictError,
     PayloadTooLargeError,
     RateLimitExceededError,
     SecurityConfigurationError,
@@ -43,10 +44,13 @@ from unified_nexus.exceptions import (
 )
 from unified_nexus.plugins import NexusPlugin, PluginManager
 from unified_nexus.security import (
+    BaseIdempotencyBackend,
     IdempotencyCache,
     ToolSafetyLevel,
     bound_output,
     check_input_bounds,
+    compute_caller_identity,
+    compute_payload_hash,
     sanitize_message,
     validate_mcp_parameters,
 )
@@ -105,6 +109,8 @@ class UnifiedNexus:
         rate_limit_hook: Callable[..., Any] | None = None,
         audit_hook: Callable[..., Any] | None = None,
         mask_error_details: bool = True,
+        idempotency_backend: BaseIdempotencyBackend | None = None,
+        idempotency_cache: BaseIdempotencyBackend | None = None,
     ):
         """
         Initializes a UnifiedNexus instance.
@@ -168,7 +174,7 @@ class UnifiedNexus:
         self.api = app
         self._mcp_app: Any | None = None
         self.plugins = PluginManager()
-        self._idempotency_cache = IdempotencyCache()
+        self._idempotency_cache = idempotency_backend or idempotency_cache or IdempotencyCache()
 
     def add_plugin(self, plugin: NexusPlugin) -> None:
         """Registers an extensible plugin for UnifiedNexus."""
@@ -244,20 +250,6 @@ class UnifiedNexus:
             # 2. Bound input payload size
             check_input_bounds(kwargs, self.max_input_chars)
 
-            # 3. Idempotency deduplication check
-            idem_key = (
-                kwargs.get("idempotency_key")
-                or kwargs.get("idempotent_key")
-                or ctx.metadata.get("idempotency_key")
-            )
-            if idempotent and idem_key:
-                cache_key = f"{tool_name}:{idem_key}"
-                found, cached_val = await self._idempotency_cache.get(cache_key)
-                if found:
-                    logger.info(
-                        f"[{ctx.request_id}] Returning cached idempotent response for key '{idem_key}' on {ctx.transport}"
-                    )
-                    return cached_val
 
             # 4. Rate limit check (FAILS CLOSED)
             if self.rate_limit_hook:
@@ -336,46 +328,112 @@ class UnifiedNexus:
                         f"Action '{tool_name}' is classified as {tool_type.value} and requires human approval."
                     )
 
-            # 7. Execute tool with concurrency limiting and timeout
-            async with self._concurrency_semaphore:
-                if inspect.iscoroutinefunction(func):
-                    exec_coro = func(*args, **kwargs)
-                else:
-                    exec_coro = run_in_threadpool(func, *args, **kwargs)
+            # 6. Multi-tenant atomic idempotency deduplication (POST-AUTHORIZATION ONLY)
+            idem_key = (
+                kwargs.get("idempotency_key")
+                or kwargs.get("idempotent_key")
+                or ctx.metadata.get("idempotency_key")
+            )
+            if not idem_key:
+                for arg in list(args) + list(kwargs.values()):
+                    if hasattr(arg, "idempotency_key"):
+                        idem_key = getattr(arg, "idempotency_key")
+                        break
+                    elif hasattr(arg, "idempotent_key"):
+                        idem_key = getattr(arg, "idempotent_key")
+                        break
+            cache_key = None
+            payload_hash = None
+            acquired_idempotency = False
 
-                raw_result = await asyncio.wait_for(exec_coro, timeout=effective_timeout)
-
-            ctx.mark_completed()
-
-            # 8. Audit hook on success
-            if self.audit_hook:
-                try:
-                    audit_record = {
-                        "request_id": ctx.request_id,
-                        "transport": ctx.transport,
-                        "tool": tool_name,
-                        "tool_type": tool_type.value,
-                        "duration_ms": ctx.duration_ms,
-                        "status": "success",
-                    }
-                    if inspect.iscoroutinefunction(self.audit_hook):
-                        await self.audit_hook(audit_record)
-                    else:
-                        await run_in_threadpool(self.audit_hook, audit_record)
-                except Exception as ae:
-                    logger.warning(f"[{ctx.request_id}] Audit hook error: {ae}")
-
-            # 9. Bound output size to avoid LLM context window exhaustion
-            bounded_res = bound_output(raw_result, self.max_output_chars)
-
-            # 10. Cache idempotent result if key provided
             if idempotent and idem_key:
-                cache_key = f"{tool_name}:{idem_key}"
-                await self._idempotency_cache.set(cache_key, bounded_res)
+                caller_id = compute_caller_identity(ctx.principal)
+                payload_hash = compute_payload_hash(kwargs)
+                cache_key = f"{caller_id}:{tool_name}:{idem_key}"
 
-            # 11. Trigger plugin after_execute hooks
-            final_res = await self.plugins.trigger_after_execute(ctx, bounded_res)
-            return final_res
+                idem_status, cached_val = await self._idempotency_cache.acquire_or_get(
+                    key=cache_key,
+                    payload_hash=payload_hash,
+                    wait_timeout=min(float(effective_timeout or 30.0), 30.0),
+                )
+
+                if idem_status == "CONFLICT":
+                    raise IdempotencyConflictError(
+                        f"Idempotency key '{idem_key}' was previously used with different request parameters."
+                    )
+                elif idem_status == "TIMEOUT":
+                    raise ToolTimeoutError(
+                        f"Timed out waiting for concurrent execution of idempotency key '{idem_key}'."
+                    )
+                elif idem_status == "CACHED":
+                    logger.info(
+                        f"[{ctx.request_id}] Returning cached idempotent response for key '{idem_key}' "
+                        f"to caller '{caller_id}' on {ctx.transport}"
+                    )
+                    ctx.mark_completed()
+                    return await self.plugins.trigger_after_execute(ctx, cached_val)
+
+                # idem_status == "ACQUIRED"
+                acquired_idempotency = True
+
+            # 7. Execute tool with concurrency limiting and timeout
+            try:
+                async with self._concurrency_semaphore:
+                    if inspect.iscoroutinefunction(func):
+                        exec_coro = func(*args, **kwargs)
+                    else:
+                        exec_coro = run_in_threadpool(func, *args, **kwargs)
+
+                    try:
+                        raw_result = await asyncio.wait_for(exec_coro, timeout=effective_timeout)
+                    except (TimeoutError, asyncio.TimeoutError):
+                        if not inspect.iscoroutinefunction(func):
+                            logger.warning(
+                                f"[{ctx.request_id}] Synchronous tool '{tool_name}' timed out after {effective_timeout}s. "
+                                f"Worker thread will run to completion. Note: Define side-effecting operations as async "
+                                f"to support immediate task cancellation."
+                            )
+                        raise
+
+                ctx.mark_completed()
+
+                # 8. Audit hook on success
+                if self.audit_hook:
+                    try:
+                        audit_record = {
+                            "request_id": ctx.request_id,
+                            "transport": ctx.transport,
+                            "tool": tool_name,
+                            "tool_type": tool_type.value,
+                            "duration_ms": ctx.duration_ms,
+                            "status": "success",
+                        }
+                        if inspect.iscoroutinefunction(self.audit_hook):
+                            await self.audit_hook(audit_record)
+                        else:
+                            await run_in_threadpool(self.audit_hook, audit_record)
+                    except Exception as ae:
+                        logger.warning(f"[{ctx.request_id}] Audit hook error: {ae}")
+
+                # 9. Bound output size to avoid LLM context window exhaustion
+                bounded_res = bound_output(raw_result, self.max_output_chars)
+
+                # 10. Complete idempotent reservation if key was acquired
+                if acquired_idempotency and cache_key and payload_hash:
+                    await self._idempotency_cache.complete(cache_key, payload_hash, bounded_res)
+
+                # 11. Trigger plugin after_execute hooks
+                final_res = await self.plugins.trigger_after_execute(ctx, bounded_res)
+                return final_res
+
+            except Exception:
+                # Release idempotency lock if tool failed so retries can execute
+                if acquired_idempotency and cache_key:
+                    try:
+                        await self._idempotency_cache.release(cache_key)
+                    except Exception:
+                        pass
+                raise
 
         except asyncio.CancelledError as ce:
             ctx.mark_completed()
@@ -394,6 +452,7 @@ class UnifiedNexus:
             SecurityConfigurationError,
             AuthorizationError,
             HumanApprovalRequiredError,
+            IdempotencyConflictError,
             PayloadTooLargeError,
             RateLimitExceededError,
             ToolTimeoutError,
@@ -499,6 +558,51 @@ class UnifiedNexus:
                 metadata={"tool_type": tool_type.value},
             )
 
+            # Automatic extraction of FastMCP authenticated identity & claims into NexusContext
+            try:
+                from fastmcp.server.dependencies import get_access_token, get_http_request
+                token = get_access_token()
+                if token:
+                    ctx.principal = getattr(token, "subject", None) or getattr(token, "client_id", None)
+                    if getattr(token, "scopes", None):
+                        ctx.permissions.update(token.scopes)
+                    claims = getattr(token, "claims", None)
+                    if isinstance(claims, dict):
+                        roles_claim = claims.get("roles") or claims.get("role") or []
+                        if isinstance(roles_claim, str):
+                            ctx.permissions.add(roles_claim)
+                        elif isinstance(roles_claim, (list, set, tuple)):
+                            ctx.permissions.update(roles_claim)
+                        perms_claim = claims.get("permissions") or []
+                        if isinstance(perms_claim, str):
+                            ctx.permissions.add(perms_claim)
+                        elif isinstance(perms_claim, (list, set, tuple)):
+                            ctx.permissions.update(perms_claim)
+                else:
+                    try:
+                        req = get_http_request()
+                        if req and hasattr(req, "scope"):
+                            user = req.scope.get("user")
+                            if user:
+                                ctx.principal = user
+                            if "permissions" in req.scope:
+                                ctx.permissions.update(req.scope["permissions"])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            try:
+                from fastmcp.server.dependencies import get_context
+                mcp_ctx = get_context()
+                if mcp_ctx:
+                    if not ctx.principal and getattr(mcp_ctx, "client_id", None):
+                        ctx.principal = mcp_ctx.client_id
+                    if getattr(mcp_ctx, "request_id", None):
+                        ctx.metadata["mcp_request_id"] = mcp_ctx.request_id
+            except Exception:
+                pass
+
             try:
                 return await self._execute_unified_pipeline(
                     ctx=ctx,
@@ -516,6 +620,7 @@ class UnifiedNexus:
                 SecurityConfigurationError,
                 AuthorizationError,
                 HumanApprovalRequiredError,
+                IdempotencyConflictError,
                 PayloadTooLargeError,
                 RateLimitExceededError,
                 ToolTimeoutError,
@@ -853,6 +958,14 @@ class UnifiedNexus:
                 if hasattr(req.state, "permissions"):
                     ctx.permissions = set(req.state.permissions)
 
+            # Auto-extract roles if principal is a dict with roles
+            if isinstance(ctx.principal, dict):
+                principal_roles = ctx.principal.get("roles") or ctx.principal.get("role") or []
+                if isinstance(principal_roles, str):
+                    ctx.permissions.add(principal_roles)
+                elif isinstance(principal_roles, (list, set, tuple)):
+                    ctx.permissions.update(principal_roles)
+
             try:
                 return await self._execute_unified_pipeline(
                     ctx=ctx,
@@ -870,6 +983,8 @@ class UnifiedNexus:
                 raise HTTPException(status_code=403, detail=str(e))
             except HumanApprovalRequiredError as e:
                 raise HTTPException(status_code=403, detail=str(e))
+            except IdempotencyConflictError as e:
+                raise HTTPException(status_code=409, detail=str(e))
             except RateLimitExceededError as e:
                 raise HTTPException(status_code=429, detail=str(e))
             except PayloadTooLargeError as e:
