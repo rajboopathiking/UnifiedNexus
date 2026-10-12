@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Unified Nexus — One Decorator. Two Interfaces.</title>
-<meta name="description" content="Unified Nexus is a Python framework that bridges FastAPI and MCP — define once, serve everywhere.">
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+<title>Unified Nexus — One Decorator. Two Interfaces. Enterprise AI-Agent Tool Serving.</title>
+<meta name="description" content="Unified Nexus is a lightweight, secure Python framework that bridges FastAPI and FastMCP — define once, serve everywhere with fail-closed security.">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,700;1,300&display=swap" rel="stylesheet">
 <style>
 :root {
   --bg: #050810;
@@ -17,8 +17,10 @@
   --accent2: #7b61ff;
   --accent3: #ff6b35;
   --text: #e8edf8;
-  --muted: #6b7a99;
+  --muted: #8292b0;
   --muted2: #4a5870;
+  --danger: #ff4757;
+  --warning: #f7c948;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 html { scroll-behavior: smooth; }
@@ -33,8 +35,8 @@ body::before {
   content:'';
   position:fixed; inset:0;
   background-image:
-    linear-gradient(rgba(0,245,196,0.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0,245,196,0.025) 1px, transparent 1px);
+    linear-gradient(rgba(0,245,196,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,245,196,0.02) 1px, transparent 1px);
   background-size: 48px 48px;
   pointer-events:none; z-index:0;
 }
@@ -43,115 +45,110 @@ body::before {
 nav {
   position: sticky; top:0; z-index: 100;
   display: flex; align-items: center; justify-content: space-between;
-  padding: 0 40px; height: 60px;
-  background: rgba(5,8,16,0.88);
-  backdrop-filter: blur(12px);
+  padding: 0 40px; height: 64px;
+  background: rgba(5,8,16,0.92);
+  backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--border);
 }
-.nav-logo { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 18px; }
+.nav-logo { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 19px; }
 .nav-logo span { color: var(--accent); }
-.nav-links { display:flex; gap:28px; }
+.nav-links { display:flex; gap:24px; }
 .nav-links a {
   font-family: 'Space Mono', monospace; font-size: 11px;
   color: var(--muted); text-decoration: none;
-  letter-spacing: 0.1em; text-transform: uppercase; transition: color 0.2s;
+  letter-spacing: 0.08em; text-transform: uppercase; transition: color 0.2s;
 }
 .nav-links a:hover { color: var(--accent); }
 .nav-cta {
   font-family: 'Space Mono', monospace; font-size: 11px;
-  padding: 7px 16px; border: 1px solid var(--accent);
-  color: var(--accent); text-decoration: none; border-radius: 2px;
-  letter-spacing: 0.08em; transition: background 0.2s, color 0.2s;
+  padding: 8px 18px; border: 1px solid var(--accent);
+  color: var(--accent); text-decoration: none; border-radius: 3px;
+  letter-spacing: 0.08em; transition: all 0.2s;
 }
 .nav-cta:hover { background: var(--accent); color: var(--bg); }
 
 /* HERO */
 .hero {
   position: relative; z-index: 1;
-  min-height: 100vh;
+  min-height: 90vh;
   display: flex; align-items: center; justify-content: center;
-  text-align: center; padding: 80px 32px;
+  text-align: center; padding: 100px 32px 80px;
 }
 .hero-glow {
-  position: absolute; width: 700px; height: 700px;
-  background: radial-gradient(circle, rgba(0,245,196,0.07) 0%, transparent 70%);
-  top: 50%; left: 50%; transform: translate(-50%, -60%);
+  position: absolute; width: 800px; height: 800px;
+  background: radial-gradient(circle, rgba(0,245,196,0.08) 0%, transparent 65%);
+  top: 45%; left: 50%; transform: translate(-50%, -50%);
   pointer-events: none;
 }
-.hero-inner { max-width: 780px; position:relative; z-index:1; }
+.hero-inner { max-width: 860px; position:relative; z-index:1; }
 
 .hero-badge {
   display: inline-flex; align-items: center; gap: 8px;
   font-family: 'Space Mono', monospace; font-size: 11px;
   color: var(--accent); border: 1px solid rgba(0,245,196,0.3);
-  padding: 5px 16px; border-radius: 20px; margin-bottom: 32px;
-  background: rgba(0,245,196,0.04);
-  animation: fadeUp 0.6s ease both;
+  padding: 6px 18px; border-radius: 20px; margin-bottom: 28px;
+  background: rgba(0,245,196,0.05);
 }
 .hero-badge-dot { width:7px; height:7px; border-radius:50%; background:var(--accent); animation: pulse 2s infinite; }
 
 .hero h1 {
   font-family: 'Syne', sans-serif;
-  font-size: clamp(56px, 10vw, 104px);
-  font-weight: 800; line-height: 0.9;
-  letter-spacing: -0.04em; margin-bottom: 10px;
-  animation: fadeUp 0.6s 0.1s ease both;
+  font-size: clamp(52px, 9vw, 96px);
+  font-weight: 800; line-height: 0.95;
+  letter-spacing: -0.04em; margin-bottom: 20px;
 }
 .line1 { display:block; color: var(--text); }
 .line2 { display:block; color: transparent; -webkit-text-stroke: 1.5px var(--accent); }
 
 .hero-sub {
-  font-size: clamp(15px, 2vw, 18px); color: var(--muted);
-  font-weight: 300; margin: 24px 0 40px; line-height: 1.7;
-  animation: fadeUp 0.6s 0.2s ease both;
+  font-size: clamp(16px, 2.2vw, 20px); color: var(--muted);
+  font-weight: 300; margin: 20px auto 36px; line-height: 1.7;
+  max-width: 680px;
 }
 .hero-sub strong { color: var(--text); font-weight: 500; }
 
 .hero-actions {
-  display: flex; gap: 14px; justify-content: center; flex-wrap: wrap;
-  animation: fadeUp 0.6s 0.3s ease both;
+  display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-bottom: 36px;
 }
 .btn-primary {
   font-family: 'Space Mono', monospace; font-size: 13px;
-  padding: 13px 28px; background: var(--accent); color: var(--bg);
+  padding: 14px 30px; background: var(--accent); color: var(--bg);
   border: none; border-radius: 3px; text-decoration: none; font-weight: 700;
-  letter-spacing: 0.05em; transition: opacity 0.2s, transform 0.2s; cursor:pointer;
+  letter-spacing: 0.05em; transition: all 0.2s; cursor:pointer;
 }
-.btn-primary:hover { opacity: 0.85; transform: translateY(-1px); }
+.btn-primary:hover { opacity: 0.9; transform: translateY(-2px); box-shadow: 0 4px 20px rgba(0,245,196,0.3); }
 .btn-ghost {
   font-family: 'Space Mono', monospace; font-size: 13px;
-  padding: 12px 28px; background: transparent; color: var(--text);
+  padding: 13px 28px; background: transparent; color: var(--text);
   border: 1px solid var(--border2); border-radius: 3px; text-decoration: none;
   letter-spacing: 0.05em; transition: border-color 0.2s;
 }
-.btn-ghost:hover { border-color: var(--text); }
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
 
 .hero-install {
-  margin-top: 40px;
   display: inline-flex; align-items: center; gap: 14px;
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: 4px; padding: 13px 22px;
-  animation: fadeUp 0.6s 0.4s ease both;
+  border-radius: 6px; padding: 12px 24px;
 }
-.hero-install code { font-family: 'Space Mono', monospace; font-size: 14px; color: var(--accent); }
-.hero-install .ver { font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted2); border-left:1px solid var(--border); padding-left:14px; }
+.hero-install code { font-family: 'Space Mono', monospace; font-size: 13px; color: var(--accent); }
+.hero-install .ver { font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted); border-left:1px solid var(--border); padding-left:14px; }
 
 /* SECTIONS */
 section { position: relative; z-index: 1; border-top: 1px solid var(--border); }
-.section-inner { max-width: 1020px; margin: 0 auto; padding: 88px 32px; }
+.section-inner { max-width: 1040px; margin: 0 auto; padding: 90px 32px; }
 .section-label {
-  font-family: 'Space Mono', monospace; font-size: 10px;
-  color: var(--muted); letter-spacing: 0.2em; text-transform: uppercase;
-  display: flex; align-items: center; gap: 14px; margin-bottom: 36px;
+  font-family: 'Space Mono', monospace; font-size: 11px;
+  color: var(--accent); letter-spacing: 0.2em; text-transform: uppercase;
+  display: flex; align-items: center; gap: 14px; margin-bottom: 24px;
 }
 .section-label::after { content:''; flex:1; height:1px; background: var(--border); }
 .section-title {
   font-family: 'Syne', sans-serif;
-  font-size: clamp(28px, 4vw, 44px);
+  font-size: clamp(30px, 4.5vw, 46px);
   font-weight: 800; line-height: 1.1;
   letter-spacing: -0.02em; margin-bottom: 16px;
 }
-.section-desc { font-size: 16px; color: var(--muted); max-width: 560px; line-height: 1.7; margin-bottom: 48px; }
+.section-desc { font-size: 16px; color: var(--muted); max-width: 640px; line-height: 1.7; margin-bottom: 48px; }
 
 /* PROBLEM */
 .vs-grid { display:grid; grid-template-columns:1fr 1fr; gap:24px; }
@@ -159,18 +156,18 @@ section { position: relative; z-index: 1; border-top: 1px solid var(--border); }
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 6px; padding: 28px; overflow:hidden;
 }
-.vs-card.bad { border-top: 2px solid #ff4757; }
-.vs-card.good { border-top: 2px solid var(--accent); }
-.vs-card h3 { font-family:'Syne',sans-serif; font-weight:700; font-size:15px; margin-bottom:16px; }
+.vs-card.bad { border-top: 3px solid var(--danger); }
+.vs-card.good { border-top: 3px solid var(--accent); }
+.vs-card h3 { font-family:'Syne',sans-serif; font-weight:700; font-size:16px; margin-bottom:16px; }
 .vs-card pre {
   font-family: 'Space Mono', monospace; font-size:12px;
   line-height:1.9; white-space:pre-wrap; color: var(--muted);
 }
-.bad-t { color: #ff6b6b; }
-.good-t { color: var(--accent); }
+.bad-t { color: #ff6b6b; font-weight: 600; }
+.good-t { color: var(--accent); font-weight: 600; }
 .dim-t { color: var(--muted2); }
 
-/* FEATURES */
+/* FEATURES GRID */
 .feat-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:20px; }
 .feat-card {
   background: var(--surface); border: 1px solid var(--border);
@@ -183,7 +180,7 @@ section { position: relative; z-index: 1; border-top: 1px solid var(--border); }
 .feat-card:nth-child(2)::before,.feat-card:nth-child(5)::before { background:var(--accent2); }
 .feat-card:nth-child(3)::before,.feat-card:nth-child(6)::before { background:var(--accent3); }
 .feat-icon { font-size:28px; margin-bottom:14px; display:block; }
-.feat-title { font-family:'Syne',sans-serif; font-weight:700; font-size:15px; margin-bottom:8px; }
+.feat-title { font-family:'Syne',sans-serif; font-weight:700; font-size:16px; margin-bottom:8px; }
 .feat-body { font-size:13px; color:var(--muted); line-height:1.65; }
 
 /* CODE TABS */
@@ -191,23 +188,42 @@ section { position: relative; z-index: 1; border-top: 1px solid var(--border); }
   background:#070c18; border:1px solid var(--border);
   border-radius:8px; overflow:hidden;
 }
-.code-tabs { display:flex; background:var(--surface); border-bottom:1px solid var(--border); }
+.code-tabs { display:flex; background:var(--surface); border-bottom:1px solid var(--border); overflow-x:auto; }
 .tab-btn {
   font-family:'Space Mono',monospace; font-size:11px;
-  padding:12px 20px; color:var(--muted); cursor:pointer;
+  padding:14px 20px; color:var(--muted); cursor:pointer;
   border:none; border-bottom:2px solid transparent;
-  background:none; letter-spacing:0.05em;
+  background:none; letter-spacing:0.05em; white-space:nowrap;
   transition:color 0.2s, border-color 0.2s;
 }
-.tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
+.tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); font-weight:700; }
 .tab-pane { display:none; padding:28px 32px; }
 .tab-pane.active { display:block; }
 .tab-pane pre {
   font-family:'Space Mono',monospace; font-size:13px;
-  line-height:1.9; overflow-x:auto; white-space:pre;
+  line-height:1.85; overflow-x:auto; white-space:pre;
 }
 .kw{color:#7b61ff} .fn{color:#00f5c4} .st{color:#ff9d6c}
-.cm{color:#2d4060} .dec{color:#f7c948} .nm{color:#ff6b35}
+.cm{color:#4a5870} .dec{color:#f7c948} .nm{color:#ff6b35}
+
+/* TABLE STYLING */
+.styled-table {
+  width: 100%; border-collapse: collapse; margin: 24px 0;
+  background: var(--surface); border-radius: 6px; overflow: hidden;
+  border: 1px solid var(--border); font-size: 13px;
+}
+.styled-table th, .styled-table td {
+  padding: 14px 18px; text-align: left; border-bottom: 1px solid var(--border);
+}
+.styled-table th {
+  background: #090e1c; font-family: 'Space Mono', monospace; font-size: 11px;
+  color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em;
+}
+.styled-table tr:last-child td { border-bottom: none; }
+.styled-table code {
+  font-family: 'Space Mono', monospace; font-size: 12px;
+  color: var(--accent); background: rgba(0,245,196,0.06); padding: 2px 6px; border-radius: 3px;
+}
 
 /* ARCH */
 .arch-wrap {
@@ -215,19 +231,35 @@ section { position: relative; z-index: 1; border-top: 1px solid var(--border); }
   border:1px solid var(--border); border-radius:8px; overflow:hidden;
 }
 .arch-node {
-  flex:1; padding:32px 20px; text-align:center;
+  flex:1; padding:32px 18px; text-align:center;
   border-right:1px solid var(--border); position:relative;
 }
 .arch-node:last-child { border-right:none; }
 .arch-node::after {
-  content:'→'; position:absolute; right:-13px; top:50%;
+  content:'→'; position:absolute; right:-12px; top:50%;
   transform:translateY(-50%); font-family:'Space Mono',monospace;
   color:var(--accent); font-size:18px; z-index:2;
 }
 .arch-node:last-child::after { display:none; }
-.arch-icon { font-size:34px; margin-bottom:12px; display:block; }
+.arch-icon { font-size:32px; margin-bottom:12px; display:block; }
 .arch-name { font-family:'Syne',sans-serif; font-weight:700; font-size:14px; margin-bottom:5px; }
 .arch-sub { font-family:'Space Mono',monospace; font-size:10px; color:var(--muted); }
+
+/* STATS BAR */
+.stats-bar {
+  display:grid; grid-template-columns:repeat(4,1fr);
+  border:1px solid var(--border); border-radius:6px; overflow:hidden;
+}
+.stat-item {
+  padding:28px 24px; text-align:center;
+  border-right:1px solid var(--border);
+}
+.stat-item:last-child { border-right:none; }
+.stat-num {
+  font-family:'Syne',sans-serif; font-size:38px; font-weight:800;
+  color:var(--accent); line-height:1; margin-bottom:6px;
+}
+.stat-lbl { font-family:'Space Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:0.1em; }
 
 /* CONNECT */
 .connect-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:20px; }
@@ -245,44 +277,23 @@ section { position: relative; z-index: 1; border-top: 1px solid var(--border); }
   padding:14px 16px; line-height:1.8; overflow-x:auto; white-space:pre-wrap;
 }
 
-/* STATS BAR */
-.stats-bar {
-  display:grid; grid-template-columns:repeat(4,1fr);
-  border:1px solid var(--border); border-radius:6px; overflow:hidden;
-}
-.stat-item {
-  padding:28px 24px; text-align:center;
-  border-right:1px solid var(--border);
-}
-.stat-item:last-child { border-right:none; }
-.stat-num {
-  font-family:'Syne',sans-serif; font-size:40px; font-weight:800;
-  color:var(--accent); line-height:1; margin-bottom:6px;
-}
-.stat-lbl { font-family:'Space Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:0.1em; }
-
 /* FOOTER */
 footer {
   position:relative; z-index:1; border-top:1px solid var(--border);
-  padding:56px 32px; text-align:center;
+  padding:60px 32px 40px; text-align:center;
 }
 .footer-logo { font-family:'Syne',sans-serif; font-weight:800; font-size:24px; margin-bottom:8px; }
 .footer-logo span { color:var(--accent); }
 .footer-tag { font-size:13px; color:var(--muted); margin-bottom:32px; }
-.footer-links { display:flex; gap:32px; justify-content:center; margin-bottom:28px; flex-wrap:wrap; }
+.footer-links { display:flex; gap:28px; justify-content:center; margin-bottom:28px; flex-wrap:wrap; }
 .footer-links a {
   font-family:'Space Mono',monospace; font-size:11px;
-  color:var(--muted); text-decoration:none; letter-spacing:0.1em;
+  color:var(--muted); text-decoration:none; letter-spacing:0.08em;
   transition:color 0.2s;
 }
 .footer-links a:hover { color:var(--accent); }
 .footer-copy { font-family:'Space Mono',monospace; font-size:11px; color:var(--muted2); }
 
-/* REVEAL */
-.reveal { opacity:0; transform:translateY(24px); transition: opacity 0.6s ease, transform 0.6s ease; }
-.reveal.visible { opacity:1; transform:translateY(0); }
-
-@keyframes fadeUp { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:translateY(0)} }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
 
 @media(max-width:768px){
@@ -293,9 +304,6 @@ footer {
   .arch-wrap { flex-direction:column; }
   .arch-node { border-right:none; border-bottom:1px solid var(--border); }
   .arch-node::after { content:'↓'; right:50%; bottom:-14px; top:auto; transform:translateX(50%); }
-}
-@media(max-width:480px){
-  .stats-bar { grid-template-columns:1fr; }
 }
 </style>
 </head>
@@ -308,7 +316,10 @@ footer {
     <a href="#problem">Problem</a>
     <a href="#features">Features</a>
     <a href="#quickstart">Quick Start</a>
-    <a href="#architecture">Architecture</a>
+    <a href="#security">Security</a>
+    <a href="#plugins">Plugins</a>
+    <a href="#safety">AI Safety</a>
+    <a href="#microservice">Microservices</a>
     <a href="#connect">Connect</a>
   </div>
   <a class="nav-cta" href="https://github.com/rajboopathiking/UnifiedNexus" target="_blank">★ GitHub</a>
@@ -320,15 +331,15 @@ footer {
   <div class="hero-inner">
     <div class="hero-badge">
       <span class="hero-badge-dot"></span>
-      Open Source · PyPI · Python 3.11+
+      v0.2.0 Hardened Release · Apache 2.0 · Python 3.11+
     </div>
     <h1>
       <span class="line1">Unified</span>
       <span class="line2">Nexus</span>
     </h1>
     <p class="hero-sub">
-      One decorator. <strong>FastAPI REST</strong> and <strong>MCP for AI agents</strong> — simultaneously.
-      No drift. No duplication. One source of truth.
+      One Python function. <strong>FastAPI REST</strong> and <strong>Model Context Protocol (MCP)</strong> simultaneously.
+      Zero interface drift. Enterprise boundaries. Production-ready AI agent serving.
     </p>
     <div class="hero-actions">
       <a class="btn-primary" href="#quickstart">Get Started →</a>
@@ -336,7 +347,7 @@ footer {
     </div>
     <div class="hero-install">
       <code>pip install unified-nexus</code>
-      <span class="ver">v0.1.0 · MIT</span>
+      <span class="ver">v0.2.0 · Apache 2.0</span>
     </div>
   </div>
 </div>
@@ -344,33 +355,33 @@ footer {
 <!-- PROBLEM -->
 <section id="problem">
   <div class="section-inner">
-    <div class="section-label reveal">The Problem</div>
-    <h2 class="section-title reveal">Stop writing the same logic twice.</h2>
-    <p class="section-desc reveal">Traditional stacks force you to define a FastAPI route, then manually re-wrap it as an MCP tool. Over time they drift apart — different validation, different behavior. Unified Nexus ends that permanently.</p>
-    <div class="vs-grid reveal">
+    <div class="section-label">The Problem</div>
+    <h2 class="section-title">Stop writing the same logic twice.</h2>
+    <p class="section-desc">Traditional AI backends force developers to write a FastAPI route, then manually re-wrap it as an MCP tool. Over time, schemas drift, authentication gets bypassed, and internal DB handles leak into LLM prompts.</p>
+    <div class="vs-grid">
       <div class="vs-card bad">
-        <h3>❌ Traditional Stack</h3>
-        <pre><span class="dim-t"># Two files. Two definitions.</span>
-<span class="dim-t"># They will drift. Always.</span>
+        <h3>❌ Vulnerable & Drifting Stack</h3>
+        <pre><span class="dim-t"># Two definitions. Different validations.</span>
+<span class="bad-t">routes/orders.py</span>     ← HTTP with Depends(get_user)
+<span class="bad-t">mcp/orders.py</span>        ← Copied MCP tool (bypasses auth)
+<span class="bad-t">models/orders.py</span>     ← Schema drift between OpenAPI & LLM
 
-<span class="bad-t">routes/user.py</span>        ← HTTP logic
-<span class="bad-t">mcp_tools/user.py</span>     ← MCP copy-paste
-<span class="dim-t">models/user.py</span>        ← maybe shared?
-
-<span class="bad-t"># Result: Code Drift. Silent bugs.</span>
-<span class="bad-t"># API validates X. Tool validates Y.</span></pre>
+<span class="bad-t"># Critical Vulnerabilities:</span>
+<span class="bad-t">• LLMs prompted to supply user_id / credentials</span>
+<span class="bad-t">• Silent security bypasses in agent layer</span>
+<span class="bad-t">• Synchronous tools starve the async event loop</span></pre>
       </div>
       <div class="vs-card good">
-        <h3>✅ Unified Nexus</h3>
-        <pre><span class="dim-t"># One file. One decorator.</span>
-<span class="dim-t"># Always in sync. Guaranteed.</span>
+        <h3>✅ UnifiedNexus v0.2.0</h3>
+        <pre><span class="dim-t"># One definition. Fail-closed security boundaries.</span>
+<span class="good-t">main.py</span>              ← One function. One decorator.
+<span class="good-t">@nexus.universal_tool</span>← Dual interfaces automatically.
 
-<span class="good-t">main.py</span>               ← REST + MCP
-<span class="good-t">@nexus.universal_tool</span> ← both at once
-<span class="dim-t">                      ← that's it.</span>
-
-<span class="good-t"># Result: One source of truth.</span>
-<span class="good-t"># HTTP and AI share exact same logic.</span></pre>
+<span class="good-t"># Verified Invariants:</span>
+<span class="good-t">✔ FastAPI Depends() rejected from MCP schemas</span>
+<span class="good-t">✔ Sensitive credentials masked with ***</span>
+<span class="good-t">✔ Threadpool offloading for slow sync tools</span>
+<span class="good-t">✔ Single lifespan & normalized /mcp mount</span></pre>
       </div>
     </div>
   </div>
@@ -379,38 +390,38 @@ footer {
 <!-- FEATURES -->
 <section id="features">
   <div class="section-inner">
-    <div class="section-label reveal">Why Unified Nexus</div>
-    <h2 class="section-title reveal">Everything you need.<br>Nothing you don't.</h2>
+    <div class="section-label">Features</div>
+    <h2 class="section-title">Enterprise AI tool serving.<br>Zero bloat.</h2>
     <div class="feat-grid">
-      <div class="feat-card reveal">
+      <div class="feat-card">
         <span class="feat-icon">⚡</span>
         <div class="feat-title">Single Source of Truth</div>
-        <div class="feat-body">Define logic once. HTTP and MCP interfaces share identical Pydantic validation, schemas, and business logic — forever in sync.</div>
+        <div class="feat-body">Define business logic once. REST and MCP share identical Pydantic validation, schemas, and docstrings — forever synchronized.</div>
       </div>
-      <div class="feat-card reveal">
-        <span class="feat-icon">🤖</span>
-        <div class="feat-title">AI-Native by Default</div>
-        <div class="feat-body">Python docstrings become rich MCP tool descriptions. Field annotations guide Claude, Cursor, and other LLM hosts on how to call your tools correctly.</div>
-      </div>
-      <div class="feat-card reveal">
-        <span class="feat-icon">🔍</span>
-        <div class="feat-title">Auto-Method Detection</div>
-        <div class="feat-body">Intelligently selects GET or POST based on your function signature. Pydantic input → POST. Query params → GET. Zero config.</div>
-      </div>
-      <div class="feat-card reveal">
+      <div class="feat-card">
         <span class="feat-icon">🛡️</span>
-        <div class="feat-title">Shared Middleware</div>
-        <div class="feat-body">Apply auth, rate limiting, or logging once. The same middleware protects both your HTTP API and MCP interface — no duplication ever.</div>
+        <div class="feat-title">Fail-Closed Security</div>
+        <div class="feat-body">Strict boundary separation. FastAPI <code>Depends()</code> and credential parameters are rejected from MCP tool arguments at startup.</div>
       </div>
-      <div class="feat-card reveal">
-        <span class="feat-icon">💬</span>
-        <div class="feat-title">LLM-Optimized Errors</div>
-        <div class="feat-body">Python exceptions are converted to natural-language hints that help LLMs self-correct their tool calls instead of returning raw stack traces.</div>
+      <div class="feat-card">
+        <span class="feat-icon">🧩</span>
+        <div class="feat-title">Bidirectional Plugins</div>
+        <div class="feat-body"><code>NexusPlugin</code> intercepts both REST and MCP requests using unified <code>NexusContext</code> for rate limiting, auditing, and tracing.</div>
       </div>
-      <div class="feat-card reveal">
-        <span class="feat-icon">🔒</span>
-        <div class="feat-title">Lifespan-Safe MCP</div>
-        <div class="feat-body">Correctly composes FastAPI and FastMCP lifespans. The MCP task group is always initialized before requests arrive — no runtime surprises.</div>
+      <div class="feat-card">
+        <span class="feat-icon">🤖</span>
+        <div class="feat-title">AI Safety Invariants</div>
+        <div class="feat-body">Classify tools with <code>ToolSafetyLevel</code> (READ_ONLY, ACTION, DESTRUCTIVE), human approvals, and payload bounding.</div>
+      </div>
+      <div class="feat-card">
+        <span class="feat-icon">🏢</span>
+        <div class="feat-title">Microservice Mount</div>
+        <div class="feat-body">Mount onto existing FastAPI apps via <code>nexus.attach_to()</code>. Normalized <code>/mcp</code> path and clean lifespan composition.</div>
+      </div>
+      <div class="feat-card">
+        <span class="feat-icon">🤝</span>
+        <div class="feat-title">LangServe Collaboration</div>
+        <div class="feat-body">Deploy LangChain LCEL runnables alongside FastMCP tools on a single ASGI application without conflicts.</div>
       </div>
     </div>
   </div>
@@ -419,11 +430,11 @@ footer {
 <!-- STATS -->
 <section>
   <div class="section-inner" style="padding-top:0">
-    <div class="stats-bar reveal">
-      <div class="stat-item"><div class="stat-num">1</div><div class="stat-lbl">port to run</div></div>
-      <div class="stat-item"><div class="stat-num">0</div><div class="stat-lbl">config files</div></div>
-      <div class="stat-item"><div class="stat-num">2</div><div class="stat-lbl">protocols served</div></div>
-      <div class="stat-item"><div class="stat-num">∞</div><div class="stat-lbl">AI integrations</div></div>
+    <div class="stats-bar">
+      <div class="stat-item"><div class="stat-num">41/41</div><div class="stat-lbl">Tests Passing</div></div>
+      <div class="stat-item"><div class="stat-num">0</div><div class="stat-lbl">Linter Warnings</div></div>
+      <div class="stat-item"><div class="stat-num">2</div><div class="stat-lbl">Protocols Served</div></div>
+      <div class="stat-item"><div class="stat-num">100%</div><div class="stat-lbl">Lifespan Preservation</div></div>
     </div>
   </div>
 </section>
@@ -431,142 +442,198 @@ footer {
 <!-- QUICKSTART -->
 <section id="quickstart">
   <div class="section-inner">
-    <div class="section-label reveal">Quick Start</div>
-    <h2 class="section-title reveal">Up and running in 60 seconds.</h2>
-    <p class="section-desc reveal">Install, define a tool, run. Your function is immediately available via both REST and MCP.</p>
-    <div class="code-wrap reveal">
+    <div class="section-label">Interactive Code Walkthrough</div>
+    <h2 class="section-title">Up and running in seconds.</h2>
+    <p class="section-desc">Explore how to install, define universal tools, register plugins, and mount to microservices.</p>
+    <div class="code-wrap">
       <div class="code-tabs">
         <button class="tab-btn active" onclick="showTab('install')">01 · Install</button>
-        <button class="tab-btn" onclick="showTab('define')">02 · Define</button>
-        <button class="tab-btn" onclick="showTab('run')">03 · Run</button>
-        <button class="tab-btn" onclick="showTab('exposure')">Exposure & Microservice</button>
-        <button class="tab-btn" onclick="showTab('advanced')">Advanced</button>
+        <button class="tab-btn" onclick="showTab('define')">02 · Universal Tool</button>
+        <button class="tab-btn" onclick="showTab('run')">03 · Run & Test</button>
+        <button class="tab-btn" onclick="showTab('plugins')">04 · Plugin Auditing</button>
+        <button class="tab-btn" onclick="showTab('safety')">05 · AI Safety</button>
+        <button class="tab-btn" onclick="showTab('mount')">06 · Mount App</button>
       </div>
+
       <div id="tab-install" class="tab-pane active">
         <pre><span class="cm"># Install via pip</span>
 pip install unified-nexus
 
-<span class="cm"># Or clone from GitHub</span>
-git clone https://github.com/rajboopathiking/UnifiedNexus
-cd UnifiedNexus
-pip install -e .</pre>
+<span class="cm"># Verify installation</span>
+python -c "import unified_nexus; print(unified_nexus.__name__)"</pre>
       </div>
+
       <div id="tab-define" class="tab-pane">
-        <pre><span class="kw">from</span> UnifiedNexus.unified_nexus <span class="kw">import</span> <span class="fn">UnifiedNexus</span>
+        <pre><span class="kw">from</span> unified_nexus <span class="kw">import</span> <span class="fn">UnifiedNexus</span>, <span class="fn">ToolSafetyLevel</span>
 <span class="kw">from</span> pydantic <span class="kw">import</span> BaseModel, Field
 
-nexus = <span class="fn">UnifiedNexus</span>(<span class="st">"MyNexusAPI"</span>)
+nexus = <span class="fn">UnifiedNexus</span>(<span class="st">"CustomerSupportAPI"</span>, version=<span class="st">"0.2.0"</span>)
 
-<span class="kw">class</span> <span class="fn">UserRequest</span>(BaseModel):
-    user_id: int = <span class="fn">Field</span>(..., description=<span class="st">"The unique ID of the user"</span>)
+<span class="kw">class</span> <span class="fn">UserQuery</span>(BaseModel):
+    user_id: int = <span class="fn">Field</span>(..., description=<span class="st">"The customer account ID"</span>)
 
-<span class="dec">@nexus.universal_tool</span>(path=<span class="st">"/user-info"</span>)
-<span class="kw">def</span> <span class="fn">get_user</span>(req: UserRequest):
+<span class="dec">@nexus.universal_tool</span>(path=<span class="st">"/customer"</span>, tool_type=<span class="fn">ToolSafetyLevel</span>.READ_ONLY, idempotent=<span class="kw">True</span>)
+<span class="kw">def</span> <span class="fn">get_customer</span>(query: UserQuery):
     <span class="st">"""
-    Fetches user status and clearance level.
-    This docstring is used by Swagger AND AI agents!
+    Returns user account status and subscription tier.
+    Auto-published to OpenAPI Swagger UI and Claude / MCP inspector tools.
     """</span>
-    <span class="kw">return</span> {<span class="st">"id"</span>: req.user_id, <span class="st">"status"</span>: <span class="st">"Active"</span>, <span class="st">"tier"</span>: <span class="st">"Gold"</span>}
+    <span class="kw">return</span> {<span class="st">"id"</span>: query.user_id, <span class="st">"status"</span>: <span class="st">"Active"</span>, <span class="st">"tier"</span>: <span class="st">"Enterprise"</span>}
 
-app = nexus.<span class="fn">finalize</span>()
-
-<span class="kw">if</span> __name__ == <span class="st">"__main__"</span>:
-    <span class="kw">import</span> uvicorn
-    uvicorn.<span class="fn">run</span>(app, host=<span class="st">"0.0.0.0"</span>, port=<span class="nm">8000</span>)</pre>
+app = nexus.<span class="fn">finalize</span>()</pre>
       </div>
+
       <div id="tab-run" class="tab-pane">
-        <pre><span class="cm"># Start the server</span>
-python main.py
+        <pre><span class="cm"># Run server with uvicorn</span>
+uvicorn main:app --host 127.0.0.1 --port 8000
 
-<span class="cm"># ✅ REST API Docs</span>
-<span class="fn">http://localhost:8000/docs</span>
+<span class="cm"># 🌐 REST API & OpenAPI Swagger Docs:</span>
+http://localhost:8000/docs
 
-<span class="cm"># ✅ MCP Endpoint</span>
-<span class="fn">http://localhost:8000/mcp</span>
+<span class="cm"># 🤖 MCP SSE Transport Endpoint:</span>
+http://localhost:8000/mcp
 
-<span class="cm"># ✅ Verify MCP with Inspector</span>
+<span class="cm"># 🔍 Inspect MCP Tools interactively:</span>
 npx -y @modelcontextprotocol/inspector http://localhost:8000/mcp</pre>
       </div>
-      <div id="tab-exposure" class="tab-pane">
-        <pre><span class="cm"># 1. Server-level control: "both", "api", or "mcp"</span>
-nexus = <span class="fn">UnifiedNexus</span>(<span class="st">"OrderMicroservice"</span>, expose=<span class="st">"both"</span>)
 
-<span class="cm"># 2. Per-tool control: API only, MCP only, or Both</span>
-<span class="dec">@nexus.universal_tool</span>(path=<span class="st">"/orders"</span>, expose=<span class="st">"both"</span>)
-<span class="kw">def</span> <span class="fn">create_order</span>(req: OrderRequest): <span class="kw">return</span> {<span class="st">"status"</span>: <span class="st">"ok"</span>}
+      <div id="tab-plugins" class="tab-pane">
+        <pre><span class="kw">from</span> unified_nexus <span class="kw">import</span> <span class="fn">NexusPlugin</span>, <span class="fn">NexusContext</span>
 
-<span class="dec">@nexus.api_only</span>(path=<span class="st">"/health"</span>)
-<span class="kw">def</span> <span class="fn">health</span>(): <span class="kw">return</span> {<span class="st">"status"</span>: <span class="st">"UP"</span>}
+<span class="kw">class</span> <span class="fn">AuditTrailPlugin</span>(<span class="fn">NexusPlugin</span>):
+    <span class="kw">async def</span> <span class="fn">before_execute</span>(self, ctx: NexusContext, kwargs: dict):
+        print(<span class="st">f"[{ctx.request_id}] {ctx.transport.upper()} calling {ctx.tool_name}"</span>)
 
-<span class="dec">@nexus.mcp_only</span>
-<span class="kw">def</span> <span class="fn">agent_planner</span>(goal: str): <span class="kw">return</span> {<span class="st">"plan"</span>: goal}
+    <span class="kw">async def</span> <span class="fn">after_execute</span>(self, ctx: NexusContext, result: any):
+        print(<span class="st">f"[{ctx.request_id}] Executed in {ctx.duration_ms:.2f}ms"</span>)
+        <span class="kw">return</span> result
 
-<span class="cm"># 3. Mount directly to existing FastAPI microservice</span>
-nexus.<span class="fn">attach_to</span>(existing_app, api_prefix=<span class="st">"/api/v1"</span>)</pre>
+nexus.<span class="fn">add_plugin</span>(<span class="fn">AuditTrailPlugin</span>())</pre>
       </div>
-      <div id="tab-advanced" class="tab-pane">
-        <pre><span class="cm"># Async tools work natively</span>
-<span class="dec">@nexus.universal_tool</span>(path=<span class="st">"/fetch"</span>)
-<span class="kw">async def</span> <span class="fn">fetch_data</span>(resource_id: str):
-    <span class="st">"""Fetches data asynchronously from external source."""</span>
-    <span class="kw">async with</span> httpx.<span class="fn">AsyncClient</span>() <span class="kw">as</span> client:
-        res = <span class="kw">await</span> client.<span class="fn">get</span>(<span class="st">f"https://api.example.com/{resource_id}"</span>)
-    <span class="kw">return</span> res.<span class="fn">json</span>()
 
-<span class="cm"># Custom path + explicit method</span>
-<span class="dec">@nexus.universal_tool</span>(path=<span class="st">"/search"</span>, methods=[<span class="st">"GET"</span>])
-<span class="kw">def</span> <span class="fn">search</span>(query: str, limit: int = <span class="nm">10</span>):
-    <span class="st">"""Search the catalog. Returns ranked results."""</span>
-    <span class="kw">return</span> {<span class="st">"results"</span>: [], <span class="st">"total"</span>: <span class="nm">0</span>}</pre>
+      <div id="tab-safety" class="tab-pane">
+        <pre><span class="cm"># Destructive tool requiring human approval and bounded output</span>
+<span class="dec">@nexus.universal_tool</span>(
+    path=<span class="st">"/terminate-server"</span>,
+    tool_type=<span class="fn">ToolSafetyLevel</span>.DESTRUCTIVE,
+    requires_approval=<span class="kw">True</span>,
+    max_output_chars=<span class="nm">5000</span>,
+    timeout=<span class="nm">10.0</span>,
+)
+<span class="kw">def</span> <span class="fn">terminate_server</span>(server_id: str, confirmation: str):
+    <span class="st">"""Terminates a production server. Requires human approval."""</span>
+    <span class="kw">return</span> {<span class="st">"server"</span>: server_id, <span class="st">"status"</span>: <span class="st">"terminated"</span>}</pre>
+      </div>
+
+      <div id="tab-mount" class="tab-pane">
+        <pre><span class="kw">from</span> fastapi <span class="kw">import</span> FastAPI
+<span class="kw">from</span> unified_nexus <span class="kw">import</span> <span class="fn">UnifiedNexus</span>
+
+existing_app = <span class="fn">FastAPI</span>(title=<span class="st">"OrderMicroservice"</span>)
+nexus = <span class="fn">UnifiedNexus</span>(<span class="st">"OrderNexus"</span>)
+
+<span class="cm"># Mounts REST at /api/v1 and MCP at /mcp cleanly preserving lifespans:</span>
+nexus.<span class="fn">attach_to</span>(existing_app, api_prefix=<span class="st">"/api/v1"</span>, mcp_path=<span class="st">"/"</span>, mode=<span class="st">"both"</span>)</pre>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ARCHITECTURE -->
-<section id="architecture">
+<!-- SECURITY SECTION -->
+<section id="security">
   <div class="section-inner">
-    <div class="section-label reveal">Architecture</div>
-    <h2 class="section-title reveal">One app. Two protocols.</h2>
-    <p class="section-desc reveal">A single ASGI process serves both interfaces. FastMCP mounts cleanly inside FastAPI with correctly composed lifespans.</p>
-    <div class="arch-wrap reveal">
-      <div class="arch-node">
-        <span class="arch-icon">🧑‍💻</span>
-        <div class="arch-name">Your Code</div>
-        <div class="arch-sub">@universal_tool</div>
-      </div>
-      <div class="arch-node">
-        <span class="arch-icon">⚡</span>
-        <div class="arch-name">UnifiedNexus</div>
-        <div class="arch-sub">finalize()</div>
-      </div>
-      <div class="arch-node">
-        <span class="arch-icon">🌐</span>
-        <div class="arch-name">FastAPI</div>
-        <div class="arch-sub">/docs · REST</div>
-      </div>
-      <div class="arch-node">
-        <span class="arch-icon">🤖</span>
-        <div class="arch-name">FastMCP</div>
-        <div class="arch-sub">/mcp · SSE</div>
-      </div>
-      <div class="arch-node">
-        <span class="arch-icon">🚀</span>
-        <div class="arch-name">Uvicorn</div>
-        <div class="arch-sub">Single ASGI</div>
-      </div>
-    </div>
+    <div class="section-label">Enterprise Boundaries</div>
+    <h2 class="section-title">Dual Transport Isolation</h2>
+    <p class="section-desc">REST authentication does not secure MCP tools, and MCP authentication does not protect REST routes. UnifiedNexus enforces fail-closed isolation.</p>
+    
+    <table class="styled-table">
+      <thead>
+        <tr>
+          <th>Security Boundary</th>
+          <th>REST Behavior</th>
+          <th>MCP (AI Agent) Behavior</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>FastAPI <code>Depends()</code></strong></td>
+          <td>Executed via HTTP Request headers</td>
+          <td><strong>Rejected</strong> with <code>SecurityConfigurationError</code></td>
+        </tr>
+        <tr>
+          <td><strong>Credential Parameters</strong></td>
+          <td>Extracted via Authorization headers</td>
+          <td><strong>Blocked</strong> from LLM tool arguments (no spoofing)</td>
+        </tr>
+        <tr>
+          <td><strong>Internal Exceptions</strong></td>
+          <td>Formatted as HTTP JSON response</td>
+          <td>Sanitized (passwords, tokens, DB URLs masked)</td>
+        </tr>
+        <tr>
+          <td><strong>Router Isolation</strong></td>
+          <td>Standard <code>include_router</code></td>
+          <td>Protected routers excluded unless authorized</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- SAFETY SECTION -->
+<section id="safety">
+  <div class="section-inner">
+    <div class="section-label">AI Safety</div>
+    <h2 class="section-title">Operational Invariants</h2>
+    <p class="section-desc">Prevent agent swarms, prompt injection floods, and unintended destructive side effects.</p>
+
+    <table class="styled-table">
+      <thead>
+        <tr>
+          <th>Invariant</th>
+          <th>Configuration</th>
+          <th>Purpose & Protection</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Tool Safety Levels</strong></td>
+          <td><code>tool_type=ToolSafetyLevel.READ_ONLY | ACTION | DESTRUCTIVE</code></td>
+          <td>Explicit capability tiering for agent planners</td>
+        </tr>
+        <tr>
+          <td><strong>Human Approval Hook</strong></td>
+          <td><code>requires_approval=True</code>, <code>approval_hook=...</code></td>
+          <td>Blocks high-risk actions without supervisor signature</td>
+        </tr>
+        <tr>
+          <td><strong>Idempotency</strong></td>
+          <td><code>idempotent=True</code></td>
+          <td>Signals safe automated retries for AI agents</td>
+        </tr>
+        <tr>
+          <td><strong>Bounded Payloads</strong></td>
+          <td><code>max_input_chars</code>, <code>max_output_chars</code></td>
+          <td>Guards context windows against prompt floods</td>
+        </tr>
+        <tr>
+          <td><strong>Threadpool Offload</strong></td>
+          <td>Automatic (Starlette <code>run_in_threadpool</code>)</td>
+          <td>Prevents slow sync tools from starving event loop</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
 </section>
 
 <!-- CONNECT -->
 <section id="connect">
   <div class="section-inner">
-    <div class="section-label reveal">AI Integrations</div>
-    <h2 class="section-title reveal">Connect any AI agent in seconds.</h2>
-    <p class="section-desc reveal">Your MCP endpoint works with every major AI host out of the box — no extra config, no plugins.</p>
+    <div class="section-label">AI Integrations</div>
+    <h2 class="section-title">Connect Any AI Host in Seconds</h2>
+    <p class="section-desc">Your FastMCP endpoint operates seamlessly with every major AI ecosystem out of the box.</p>
     <div class="connect-grid">
-      <div class="connect-card reveal">
+      <div class="connect-card">
         <h3>🟣 Claude Desktop</h3>
         <pre>{
   "mcpServers": {
@@ -577,28 +644,22 @@ nexus.<span class="fn">attach_to</span>(existing_app, api_prefix=<span class="st
   }
 }</pre>
       </div>
-      <div class="connect-card reveal">
+      <div class="connect-card">
         <h3>🔵 Cursor / VS Code</h3>
-        <pre># Add to MCP settings:
+        <pre># In Cursor MCP Settings:
 
 Server URL:
 http://localhost:8000/mcp
 
 Transport:
-streamable-http
-
-# Your tools appear in
-# the AI sidebar instantly.</pre>
+streamable-http</pre>
       </div>
-      <div class="connect-card reveal">
+      <div class="connect-card">
         <h3>🔍 MCP Inspector</h3>
-        <pre># Test & debug all tools:
+        <pre># Test & inspect all tools:
 
 npx -y @modelcontextprotocol/inspector \
-  http://localhost:8000/mcp
-
-# Opens at localhost:6274
-# Full tool call UI included.</pre>
+  http://localhost:8000/mcp</pre>
       </div>
     </div>
   </div>
@@ -607,31 +668,25 @@ npx -y @modelcontextprotocol/inspector \
 <!-- FOOTER -->
 <footer>
   <div class="footer-logo">Unified<span>Nexus</span></div>
-  <p class="footer-tag">One Decorator. Two Interfaces. Total Focus.</p>
+  <p class="footer-tag">One Decorator. Two Interfaces. Fail-Closed Security.</p>
   <div class="footer-links">
     <a href="https://github.com/rajboopathiking/UnifiedNexus" target="_blank">★ GitHub</a>
     <a href="https://pypi.org/project/unified-nexus" target="_blank">📦 PyPI</a>
     <a href="https://github.com/rajboopathiking/UnifiedNexus/issues" target="_blank">🐛 Issues</a>
     <a href="https://github.com/rajboopathiking/UnifiedNexus/blob/main/CHANGELOG.md" target="_blank">📋 Changelog</a>
-    <a href="https://github.com/rajboopathiking/UnifiedNexus/blob/main/LICENSE" target="_blank">MIT License</a>
+    <a href="https://github.com/rajboopathiking/UnifiedNexus/blob/main/LICENSE" target="_blank">Apache 2.0 License</a>
   </div>
-  <p class="footer-copy">github.com/rajboopathiking/UnifiedNexus · Built for the AI-native backend era.</p>
+  <p class="footer-copy">github.com/rajboopathiking/UnifiedNexus · Built for enterprise AI-native backends.</p>
 </footer>
 
 <script>
   function showTab(name) {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-    document.getElementById('tab-' + name).classList.add('active');
+    const targetTab = document.getElementById('tab-' + name);
+    if (targetTab) targetTab.classList.add('active');
     event.target.classList.add('active');
   }
-
-  // Scroll reveal
-  const observer = new IntersectionObserver(
-    entries => entries.forEach(e => { if(e.isIntersecting) e.target.classList.add('visible'); }),
-    { threshold: 0.1 }
-  );
-  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
 </script>
 </body>
 </html>

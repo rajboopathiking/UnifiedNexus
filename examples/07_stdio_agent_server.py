@@ -7,11 +7,13 @@ Demonstrates:
 - Tools defined with @nexus.universal_tool or @nexus.mcp_only are immediately available.
 """
 
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
 from pydantic import BaseModel, Field
+
 from unified_nexus import UnifiedNexus
 
 nexus = UnifiedNexus("LocalAgentTools")

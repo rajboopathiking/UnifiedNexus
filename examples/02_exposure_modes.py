@@ -8,13 +8,15 @@ Demonstrates:
 - Overriding exposure mode dynamically at finalize() time.
 """
 
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
 import uvicorn
 from pydantic import BaseModel, Field
-from unified_nexus import UnifiedNexus, ExposureMode
+
+from unified_nexus import UnifiedNexus
 
 # App-level exposure mode: "both" (default), "api", or "mcp"
 nexus = UnifiedNexus("ExposureApp", expose="both")

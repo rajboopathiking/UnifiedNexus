@@ -1,15 +1,56 @@
+"""
+UnifiedNexus: One decorator. Two interfaces.
+Bridges FastAPI and Model Context Protocol (MCP) with enterprise-grade security,
+AI-agent safety, robust routing, and microservice lifespan preservation.
+"""
+
+import asyncio
+import functools
 import inspect
 import logging
-import functools
-from enum import Enum
+import time
+import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
-from typing import Callable, Any, Optional, List, Union, Set
-from fastapi import FastAPI, APIRouter, UploadFile, Request, Response
-from fastapi.params import Depends as DependsParam
-from fastmcp import FastMCP
-from pydantic import BaseModel
+from enum import Enum
+from typing import Any
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+from fastapi import APIRouter, FastAPI, Request, Response, UploadFile
+from fastapi.params import Depends as DependsParam
+from fastapi.routing import APIRoute
+
+try:
+    from fastapi.params import Security as SecurityParam
+except ImportError:
+    SecurityParam = DependsParam
+from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
+
+from unified_nexus.context import NexusContext
+from unified_nexus.exceptions import (
+    AuthorizationError,
+    ConcurrencyLimitError,
+    DuplicateRouteError,
+    DuplicateToolError,
+    HumanApprovalRequiredError,
+    PayloadTooLargeError,
+    RateLimitExceededError,
+    SecurityConfigurationError,
+    ToolTimeoutError,
+    UnifiedNexusError,
+)
+from unified_nexus.plugins import NexusPlugin, PluginManager
+from unified_nexus.security import (
+    ToolSafetyLevel,
+    bound_output,
+    check_input_bounds,
+    sanitize_message,
+    validate_mcp_parameters,
+)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("unified-nexus")
 
 
@@ -48,30 +89,88 @@ class UnifiedNexus:
         self,
         name: str,
         version: str = "1.0.0",
-        app: Optional[FastAPI] = None,
-        expose: Optional[Union[str, ExposureMode]] = None,
-        mode: Optional[Union[str, ExposureMode]] = None,
+        app: FastAPI | None = None,
+        expose: str | ExposureMode | None = None,
+        mode: str | ExposureMode | None = None,
+        auth: Any | None = None,
+        mcp_auth: Any | None = None,
+        rest_auth: Any | None = None,
+        default_timeout: float = 30.0,
+        concurrency_limit: int = 50,
+        max_input_chars: int = 100_000,
+        max_output_chars: int = 50_000,
+        authorize_hook: Callable[..., Any] | None = None,
+        approval_hook: Callable[..., Any] | None = None,
+        rate_limit_hook: Callable[..., Any] | None = None,
+        audit_hook: Callable[..., Any] | None = None,
+        mask_error_details: bool = True,
     ):
         """
         Initializes a UnifiedNexus instance.
 
         Args:
-            name:    Application name.
-            version: Application version.
-            app:     Optional existing FastAPI app (for mounting in microservices).
-            expose:  Default exposure mode for the app ('both', 'api', or 'mcp').
-            mode:    Alias for `expose`.
+            name:               Application name.
+            version:            Application version.
+            app:                Optional existing FastAPI app (for mounting in microservices).
+            expose:             Default exposure mode for the app ('both', 'api', or 'mcp').
+            mode:               Alias for `expose`.
+            auth:               Optional shared/MCP authentication provider.
+            mcp_auth:           Explicit FastMCP AuthProvider (e.g. TokenVerifier).
+            rest_auth:          Explicit FastAPI dependency or security handler for REST routes.
+            default_timeout:    Default tool execution timeout in seconds (default 30.0s).
+            concurrency_limit:  Max concurrent tool executions (default 50).
+            max_input_chars:    Max characters allowed for string inputs (default 100,000).
+            max_output_chars:   Max characters before output is truncated (default 50,000).
+            authorize_hook:     Optional hook: (tool_name, kwargs, roles, scopes) -> bool.
+            approval_hook:      Optional hook for human approval: (tool_name, kwargs, tool_type) -> bool.
+            rate_limit_hook:    Optional hook for rate limiting: (tool_name, kwargs) -> bool.
+            audit_hook:         Optional hook for audit logging: (record_dict) -> None.
+            mask_error_details: Redact raw internal tracebacks/secrets from client responses.
         """
         self.name = name
         self.version = version
         self._mode = normalize_exposure(expose or mode or ExposureMode.BOTH)
-        self.mcp = FastMCP(name)
-        self._endpoints = []
-        self._routers = []      # holds (router, prefix, tags, expose) dicts
-        self._middlewares = []  # holds (middleware_class, kwargs) tuples
-        self._registered_mcp_tools: Set[str] = set()
+
+        # FastMCP configuration
+        effective_mcp_auth = mcp_auth
+        if effective_mcp_auth is None and auth is not None:
+            try:
+                from fastmcp.server.auth import AuthProvider
+                if isinstance(auth, AuthProvider):
+                    effective_mcp_auth = auth
+            except ImportError:
+                pass
+
+        self.mcp = FastMCP(
+            name,
+            auth=effective_mcp_auth,
+            mask_error_details=mask_error_details,
+        )
+
+        self.rest_auth = rest_auth
+        self.default_timeout = default_timeout
+        self.max_input_chars = max_input_chars
+        self.max_output_chars = max_output_chars
+        self.authorize_hook = authorize_hook
+        self.approval_hook = approval_hook
+        self.rate_limit_hook = rate_limit_hook
+        self.audit_hook = audit_hook
+        self.mask_error_details = mask_error_details
+
+        self._concurrency_semaphore = asyncio.Semaphore(concurrency_limit)
+        self._endpoints: list[dict] = []
+        self._routers: list[dict] = []
+        self._middlewares: list[tuple[Any, dict]] = []
+        self._registered_mcp_tools: set[str] = set()
+        self._registered_routes: set[tuple[str, str]] = set()  # (method, full_path)
         self._existing_app = app
         self.api = app
+        self._mcp_app: Any | None = None
+        self.plugins = PluginManager()
+
+    def add_plugin(self, plugin: NexusPlugin) -> None:
+        """Registers an extensible plugin for UnifiedNexus."""
+        self.plugins.add_plugin(plugin)
 
     @property
     def mode(self) -> ExposureMode:
@@ -79,7 +178,7 @@ class UnifiedNexus:
         return self._mode
 
     @mode.setter
-    def mode(self, value: Union[str, ExposureMode]):
+    def mode(self, value: str | ExposureMode):
         self._mode = normalize_exposure(value)
 
     @property
@@ -88,8 +187,29 @@ class UnifiedNexus:
         return self._mode
 
     @expose.setter
-    def expose(self, value: Union[str, ExposureMode]):
+    def expose(self, value: str | ExposureMode):
         self._mode = normalize_exposure(value)
+
+    # ─────────────────────────────────────────────
+    # MCP SINGLETON APP & LIFESPAN MANAGEMENT
+    # ─────────────────────────────────────────────
+    def _get_or_create_mcp_app(self, mcp_path: str = "/") -> Any:
+        """
+        Returns the cached Starlette ASGI sub-application for FastMCP.
+        Normalizes mount paths to eliminate /mcp/mcp duplication and ensures
+        a single ASGI instance is reused across mount and lifespan.
+        """
+        if self._mcp_app is not None:
+            return self._mcp_app
+
+        clean = (mcp_path or "/").strip().rstrip("/")
+        if clean in ("", "/"):
+            internal_path = "/mcp"
+        else:
+            internal_path = "/"
+
+        self._mcp_app = self.mcp.http_app(path=internal_path)
+        return self._mcp_app
 
     # ─────────────────────────────────────────────
     # INTERNAL MCP REGISTRATION HELPER
@@ -97,64 +217,246 @@ class UnifiedNexus:
     def _register_endpoint_to_mcp(
         self,
         func: Callable[..., Any],
-        name: Optional[str] = None,
-        description: Optional[str] = None,
+        name: str | None = None,
+        description: str | None = None,
+        tool_type: ToolSafetyLevel = ToolSafetyLevel.READ_ONLY,
+        requires_approval: bool = False,
+        idempotent: bool = False,
+        timeout: float | None = None,
+        roles: list[str] | None = None,
+        scopes: list[str] | None = None,
+        auth: Any | None = None,
+        explicit_mcp: bool = False,
     ):
-        """Registers a function as an MCP tool with async handling and error hints."""
+        """
+        Registers a function as an MCP tool with security validation,
+        concurrency limits, bounded I/O, secret redaction, and audit logging.
+        """
         tool_name = name or func.__name__
+
+        # 1. Detect duplicate MCP tools
         if tool_name in self._registered_mcp_tools:
-            return
+            raise DuplicateToolError(
+                f"Duplicate MCP tool registration: tool '{tool_name}' is already registered."
+            )
 
         sig = inspect.signature(func)
+
+        # 2. Check for HTTP-specific parameters (UploadFile, Request, Response)
         has_incompatible = any(
             p.annotation in (UploadFile, Request, Response)
             for p in sig.parameters.values()
         )
         if has_incompatible:
+            if explicit_mcp:
+                raise SecurityConfigurationError(
+                    f"Cannot register '{tool_name}' to MCP: Parameter types (UploadFile/Request/Response) "
+                    f"are HTTP-specific and cannot be serialized over MCP."
+                )
             logger.info(
-                f"ℹ️  '{tool_name}' has HTTP-specific types (e.g. UploadFile/Request) — skipped MCP registration."
+                f"ℹ️  '{tool_name}' has HTTP-specific types (e.g. UploadFile/Request) — safely skipped MCP registration."
             )
             return
 
+        # 3. Reject unsupported FastAPI Depends/Security and credential parameters
+        validate_mcp_parameters(tool_name, sig.parameters)
+
+        effective_timeout = timeout or self.default_timeout
+
         @functools.wraps(func)
         async def unified_wrapper(*args, **kwargs):
-            try:
-                # Auto-resolve FastAPI Depends when invoked through MCP
-                for p_name, param in sig.parameters.items():
-                    val = kwargs.get(p_name)
-                    if (
-                        (p_name not in kwargs or isinstance(val, DependsParam))
-                        and isinstance(param.default, DependsParam)
-                        and callable(param.default.dependency)
-                    ):
-                        dep = param.default.dependency
-                        if inspect.iscoroutinefunction(dep):
-                            kwargs[p_name] = await dep()
-                        else:
-                            kwargs[p_name] = dep()
+            request_id = str(uuid.uuid4())
+            start_time = time.perf_counter()
+            ctx = NexusContext(
+                transport="mcp",
+                tool_name=tool_name,
+                request_id=request_id,
+                principal=kwargs.get("__principal__") or kwargs.get("user_id"),
+                permissions=set(roles or []),
+                metadata={"tool_type": tool_type.value},
+                start_time=start_time,
+            )
 
-                if inspect.iscoroutinefunction(func):
-                    return await func(*args, **kwargs)
-                return func(*args, **kwargs)
+            try:
+                # 1. Trigger plugin before_execute hooks
+                await self.plugins.trigger_before_execute(ctx, kwargs)
+
+                # Bound input payload size
+                check_input_bounds(kwargs, self.max_input_chars)
+
+                # Rate limit check
+                if self.rate_limit_hook:
+                    try:
+                        if inspect.iscoroutinefunction(self.rate_limit_hook):
+                            allowed = await self.rate_limit_hook(tool_name, kwargs)
+                        else:
+                            allowed = await run_in_threadpool(self.rate_limit_hook, tool_name, kwargs)
+                        if not allowed:
+                            raise RateLimitExceededError(f"Rate limit exceeded for tool '{tool_name}'.")
+                    except RateLimitExceededError:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"[{request_id}] Rate limit hook error: {e}")
+
+                # Execution-time authorization check
+                if self.authorize_hook:
+                    try:
+                        if inspect.iscoroutinefunction(self.authorize_hook):
+                            auth_ok = await self.authorize_hook(tool_name, kwargs, roles, scopes)
+                        else:
+                            auth_ok = await run_in_threadpool(self.authorize_hook, tool_name, kwargs, roles, scopes)
+                        if not auth_ok:
+                            raise AuthorizationError(
+                                f"Unauthorized: Caller is not authorized to execute tool '{tool_name}'."
+                            )
+                    except AuthorizationError:
+                        raise
+                    except Exception as e:
+                        logger.error(f"[{request_id}] Authorize hook error: {e}")
+                        raise AuthorizationError(f"Authorization check failed for tool '{tool_name}'.")
+
+                if roles:
+                    caller_role = kwargs.get("caller_role") or kwargs.get("role")
+                    if caller_role not in roles:
+                        raise AuthorizationError(f"Unauthorized: Caller lacks required role: {roles}")
+
+                # Human approval check for sensitive / destructive operations
+                needs_approval = requires_approval or (tool_type == ToolSafetyLevel.DESTRUCTIVE)
+                if needs_approval:
+                    approved = False
+                    if self.approval_hook:
+                        try:
+                            if inspect.iscoroutinefunction(self.approval_hook):
+                                approved = await self.approval_hook(tool_name, kwargs, tool_type)
+                            else:
+                                approved = await run_in_threadpool(self.approval_hook, tool_name, kwargs, tool_type)
+                        except Exception as e:
+                            logger.error(f"[{request_id}] Approval hook error: {e}")
+                    elif kwargs.get("__approved__") is True:
+                        approved = True
+
+                    if not approved:
+                        raise HumanApprovalRequiredError(
+                            f"Action '{tool_name}' is classified as {tool_type.value} and requires human approval."
+                        )
+
+                # Execute tool with concurrency limiting and timeout
+                async with self._concurrency_semaphore:
+                    if inspect.iscoroutinefunction(func):
+                        exec_coro = func(*args, **kwargs)
+                    else:
+                        exec_coro = run_in_threadpool(func, *args, **kwargs)
+
+                    raw_result = await asyncio.wait_for(exec_coro, timeout=effective_timeout)
+
+                ctx.mark_completed()
+
+                # Audit hook on success
+                if self.audit_hook:
+                    try:
+                        audit_record = {
+                            "request_id": request_id,
+                            "tool": tool_name,
+                            "tool_type": tool_type.value,
+                            "duration_ms": ctx.duration_ms,
+                            "status": "success",
+                        }
+                        if inspect.iscoroutinefunction(self.audit_hook):
+                            await self.audit_hook(audit_record)
+                        else:
+                            await run_in_threadpool(self.audit_hook, audit_record)
+                    except Exception as ae:
+                        logger.warning(f"[{request_id}] Audit hook error: {ae}")
+
+                # Bound output size to avoid LLM context window exhaustion
+                bounded_res = bound_output(raw_result, self.max_output_chars)
+
+                # 2. Trigger plugin after_execute hooks
+                final_res = await self.plugins.trigger_after_execute(ctx, bounded_res)
+                return final_res
+
+            except asyncio.CancelledError as ce:
+                ctx.mark_completed()
+                await self.plugins.trigger_on_error(ctx, ce)
+                logger.warning(f"[{request_id}] Tool '{tool_name}' execution was cancelled.")
+                raise
+
+            except TimeoutError as te:
+                ctx.mark_completed()
+                await self.plugins.trigger_on_error(ctx, te)
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                logger.error(f"[{request_id}] Tool '{tool_name}' timed out after {effective_timeout}s.")
+                raise ToolError(f"Tool '{tool_name}' timed out after {effective_timeout}s.")
+
+            except (
+                SecurityConfigurationError,
+                AuthorizationError,
+                HumanApprovalRequiredError,
+                PayloadTooLargeError,
+                RateLimitExceededError,
+            ) as domain_err:
+                ctx.mark_completed()
+                await self.plugins.trigger_on_error(ctx, domain_err)
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                logger.warning(f"[{request_id}] Tool '{tool_name}' rejected: {domain_err}")
+                raise ToolError(str(domain_err))
+
             except Exception as e:
-                logger.error(f"❌ [{tool_name}]: {e}")
+                ctx.mark_completed()
+                await self.plugins.trigger_on_error(ctx, e)
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                sanitized_msg = sanitize_message(str(e))
+                logger.error(f"[{request_id}] Error in tool '{tool_name}' ({duration_ms:.2f}ms): {sanitized_msg}")
+
+                if self.audit_hook:
+                    try:
+                        audit_record = {
+                            "request_id": request_id,
+                            "tool": tool_name,
+                            "tool_type": tool_type.value,
+                            "duration_ms": duration_ms,
+                            "status": "error",
+                            "error": sanitized_msg,
+                        }
+                        if inspect.iscoroutinefunction(self.audit_hook):
+                            await self.audit_hook(audit_record)
+                        else:
+                            await run_in_threadpool(self.audit_hook, audit_record)
+                    except Exception:
+                        pass
+
                 return {
-                    "error": str(e),
+                    "error": sanitized_msg,
                     "tool": tool_name,
-                    "hint": f"Check the parameters passed to '{tool_name}'. {str(e)}",
+                    "hint": f"Check the parameters passed to '{tool_name}'. {sanitized_msg}",
                 }
 
-
         doc = description or (func.__doc__.strip().split("\n")[0] if func.__doc__ else None)
+
+        # FastMCP tool-level auth check (when explicitly provided)
+        mcp_tool_auth = auth
+
         try:
-            self.mcp.tool(name=tool_name, description=doc)(unified_wrapper)
+            self.mcp.tool(
+                name=tool_name,
+                description=doc,
+                timeout=effective_timeout,
+                auth=mcp_tool_auth,
+            )(unified_wrapper)
             self._registered_mcp_tools.add(tool_name)
         except Exception as e:
             logger.warning(f"Could not register '{tool_name}' as MCP tool: {e}")
+            raise
 
-    def _register_router_to_mcp(self, router: APIRouter):
+    def _register_router_to_mcp(self, router: APIRouter, prefix: str = ""):
         """Inspects an APIRouter and registers compatible routes as FastMCP tools."""
-        from fastapi.routing import APIRoute
+        # 1. Reject routers with security dependencies from silent/unauthenticated MCP conversion
+        if router.dependencies:
+            raise SecurityConfigurationError(
+                f"Cannot register router '{prefix}' to MCP: Router has {len(router.dependencies)} "
+                f"router-level security dependencies. FastAPI dependencies cannot be evaluated by MCP tools. "
+                f"Use expose='api' for secured routers, or configure explicit MCP authorization policies."
+            )
 
         for route in router.routes:
             if isinstance(route, APIRoute):
@@ -166,34 +468,52 @@ class UnifiedNexus:
                         if route.endpoint.__doc__
                         else None
                     ),
+                    explicit_mcp=False,
                 )
 
     # ─────────────────────────────────────────────
-    # DECORATOR
+    # DECORATORS
     # ─────────────────────────────────────────────
     def universal_tool(
         self,
-        path: Optional[Union[str, Callable[..., Any]]] = None,
-        methods: Optional[List[str]] = None,
-        tags: Optional[List[str]] = None,
-        router: Optional[APIRouter] = None,
-        include_in_mcp: Optional[bool] = None,
-        expose: Optional[Union[str, ExposureMode]] = None,
-        mode: Optional[Union[str, ExposureMode]] = None,
+        path: str | Callable[..., Any] | None = None,
+        methods: list[str] | None = None,
+        tags: list[str] | None = None,
+        router: APIRouter | None = None,
+        include_in_mcp: bool | None = None,
+        expose: str | ExposureMode | None = None,
+        mode: str | ExposureMode | None = None,
+        tool_type: ToolSafetyLevel | str = ToolSafetyLevel.READ_ONLY,
+        requires_approval: bool = False,
+        idempotent: bool = False,
+        timeout: float | None = None,
+        roles: list[str] | None = None,
+        scopes: list[str] | None = None,
+        auth: Any | None = None,
+        name: str | None = None,
+        description: str | None = None,
     ):
         """
         Registers a function as a FastAPI route, an MCP tool, or both.
 
         Args:
-            path:           URL path (e.g. "/users"). Defaults to '/<function_name>' for HTTP routes.
-            methods:        HTTP methods. Auto-detected if not set.
-            tags:           Swagger tags.
-            router:         Optional APIRouter to attach this route to.
-            include_in_mcp: Legacy flag. If False, equivalent to expose='api'.
-            expose:         Exposure option: 'both', 'api' ('api_only'), or 'mcp' ('mcp_only').
-            mode:           Alias for `expose`.
+            path:               URL path (e.g. "/users"). Defaults to '/<function_name>' for HTTP routes.
+            methods:            HTTP methods. Auto-detected if not set.
+            tags:               Swagger tags.
+            router:             Optional APIRouter to attach this route to.
+            include_in_mcp:     Legacy flag. If False, equivalent to expose='api'.
+            expose:             Exposure option: 'both', 'api' ('api_only'), or 'mcp' ('mcp_only').
+            mode:               Alias for `expose`.
+            tool_type:          Tool safety level ('read_only', 'action', 'destructive').
+            requires_approval:  Require explicit approval for execution.
+            idempotent:         Declares operation is safe for retry.
+            timeout:            Tool execution timeout in seconds.
+            roles:              Required authorization roles.
+            scopes:             Required authorization scopes.
+            auth:               Explicit FastMCP AuthCheck for tool.
+            name:               Custom name for the tool/route (defaults to function name).
+            description:        Custom description for Swagger docs and MCP tool schema.
         """
-        # Support @nexus.universal_tool without parentheses
         if callable(path):
             func = path
             return self.universal_tool(
@@ -204,6 +524,15 @@ class UnifiedNexus:
                 include_in_mcp=include_in_mcp,
                 expose=expose,
                 mode=mode,
+                tool_type=tool_type,
+                requires_approval=requires_approval,
+                idempotent=idempotent,
+                timeout=timeout,
+                roles=roles,
+                scopes=scopes,
+                auth=auth,
+                name=name,
+                description=description,
             )(func)
 
         # Resolve exposure mode for this tool
@@ -212,9 +541,16 @@ class UnifiedNexus:
         else:
             tool_exposure = normalize_exposure(expose or mode or ExposureMode.BOTH)
 
+        safety_level = ToolSafetyLevel(tool_type) if isinstance(tool_type, str) else tool_type
+
         def decorator(func: Callable[..., Any]):
             sig = inspect.signature(func)
             actual_path = path or f"/{func.__name__}"
+            tool_name = name or func.__name__
+            tool_doc = description or (
+                func.__doc__.strip().split("\n")[0]
+                if func.__doc__ else None
+            )
 
             # Auto-detect HTTP method
             has_body = any(
@@ -228,23 +564,50 @@ class UnifiedNexus:
             actual_methods = methods or (["POST"] if has_body else ["GET"])
             actual_tags = tags or ["Unified Interface"]
 
-            # Register with FastMCP if tool_exposure is BOTH or MCP
+            # 1. Register with FastMCP if tool_exposure is BOTH or MCP
             if tool_exposure in (ExposureMode.BOTH, ExposureMode.MCP):
-                self._register_endpoint_to_mcp(func, name=func.__name__)
+                self._register_endpoint_to_mcp(
+                    func=func,
+                    name=tool_name,
+                    description=tool_doc,
+                    tool_type=safety_level,
+                    requires_approval=requires_approval,
+                    idempotent=idempotent,
+                    timeout=timeout,
+                    roles=roles,
+                    scopes=scopes,
+                    auth=auth,
+                    explicit_mcp=(tool_exposure == ExposureMode.MCP),
+                )
 
-            # FastAPI / tool tracking
+            # 2. Check for duplicate REST route configurations if exposed to API
+            if tool_exposure in (ExposureMode.BOTH, ExposureMode.API):
+                clean_path = actual_path if actual_path.startswith("/") else "/" + actual_path
+                for method in actual_methods:
+                    route_key = (method.upper(), clean_path)
+                    if route_key in self._registered_routes:
+                        raise DuplicateRouteError(
+                            f"Duplicate REST route registration: [{method.upper()}] '{clean_path}' "
+                            f"is already registered."
+                        )
+                    self._registered_routes.add(route_key)
+
+            # 3. Track endpoint registration
             self._endpoints.append({
                 "path": actual_path,
                 "func": func,
                 "methods": actual_methods,
                 "tags": actual_tags,
-                "name": func.__name__,
+                "name": tool_name,
                 "router": router,
                 "summary": (
                     func.__doc__.strip().split("\n")[0]
                     if func.__doc__ else None
                 ),
                 "expose": tool_exposure,
+                "tool_type": safety_level,
+                "requires_approval": requires_approval,
+                "idempotent": idempotent,
             })
 
             return func
@@ -252,15 +615,12 @@ class UnifiedNexus:
 
     def api_only(
         self,
-        path: Optional[Union[str, Callable[..., Any]]] = None,
-        methods: Optional[List[str]] = None,
-        tags: Optional[List[str]] = None,
-        router: Optional[APIRouter] = None,
+        path: str | Callable[..., Any] | None = None,
+        methods: list[str] | None = None,
+        tags: list[str] | None = None,
+        router: APIRouter | None = None,
     ):
-        """
-        Shortcut decorator to register a route ONLY as a FastAPI REST endpoint.
-        Can be used as @nexus.api_only('/path') or @nexus.api_only.
-        """
+        """Shortcut decorator to register a route ONLY as a FastAPI REST endpoint."""
         if callable(path):
             func = path
             return self.universal_tool(path=None, methods=methods, tags=tags, router=router, expose=ExposureMode.API)(func)
@@ -274,18 +634,42 @@ class UnifiedNexus:
 
     def mcp_only(
         self,
-        func: Optional[Callable[..., Any]] = None,
+        func: Callable[..., Any] | None = None,
+        tool_type: ToolSafetyLevel | str = ToolSafetyLevel.READ_ONLY,
+        requires_approval: bool = False,
+        idempotent: bool = False,
+        timeout: float | None = None,
+        roles: list[str] | None = None,
+        scopes: list[str] | None = None,
+        auth: Any | None = None,
     ):
-        """
-        Shortcut decorator to register a tool ONLY in MCP (no FastAPI route).
-        Can be used as @nexus.mcp_only or @nexus.mcp_only().
-        """
+        """Shortcut decorator to register a tool ONLY in MCP (no FastAPI route)."""
         if callable(func):
-            return self.universal_tool(path=None, expose=ExposureMode.MCP)(func)
-        return self.universal_tool(
-            path=None,
-            expose=ExposureMode.MCP,
-        )
+            return self.universal_tool(
+                path=None,
+                expose=ExposureMode.MCP,
+                tool_type=tool_type,
+                requires_approval=requires_approval,
+                idempotent=idempotent,
+                timeout=timeout,
+                roles=roles,
+                scopes=scopes,
+                auth=auth,
+            )(func)
+
+        def decorator(f: Callable[..., Any]):
+            return self.universal_tool(
+                path=None,
+                expose=ExposureMode.MCP,
+                tool_type=tool_type,
+                requires_approval=requires_approval,
+                idempotent=idempotent,
+                timeout=timeout,
+                roles=roles,
+                scopes=scopes,
+                auth=auth,
+            )(f)
+        return decorator
 
     # ─────────────────────────────────────────────
     # ROUTER REGISTRATION
@@ -294,61 +678,108 @@ class UnifiedNexus:
         self,
         router: APIRouter,
         prefix: str = "",
-        tags: Optional[List[str]] = None,
-        expose: Optional[Union[str, ExposureMode]] = None,
+        tags: list[str] | None = None,
+        expose: str | ExposureMode | None = None,
     ):
         """
-        Register an APIRouter with the framework.
-        If expose is 'both' or 'mcp', automatically registers the router's endpoints as MCP tools.
-
-        Example:
-            nexus.include_router(user_router, prefix="/users", tags=["Users"], expose="both")
+        Registers an APIRouter with the framework.
+        If expose is 'both' or 'mcp', validates and registers router endpoints as MCP tools.
+        Guarantees that MCP-only routers are never accidentally mounted to REST.
         """
         router_exposure = normalize_exposure(expose) if expose else ExposureMode.API
+        clean_prefix = prefix.rstrip("/") if prefix else ""
+
         self._routers.append({
             "router": router,
-            "prefix": prefix,
+            "prefix": clean_prefix,
             "tags": tags or [],
             "expose": router_exposure,
         })
 
         if router_exposure in (ExposureMode.BOTH, ExposureMode.MCP):
-            self._register_router_to_mcp(router)
+            self._register_router_to_mcp(router, prefix=clean_prefix)
 
     # ─────────────────────────────────────────────
-    # MIDDLEWARE
+    # MIDDLEWARE & HEALTH CHECK
     # ─────────────────────────────────────────────
     def add_middleware(self, middleware_class, **kwargs):
-        """
-        Add any Starlette/FastAPI middleware.
-
-        Example:
-            from fastapi.middleware.cors import CORSMiddleware
-            nexus.add_middleware(CORSMiddleware, allow_origins=["*"])
-        """
+        """Add any Starlette/FastAPI middleware."""
         self._middlewares.append((middleware_class, kwargs))
+
+    def add_health_check(self, path: str = "/healthz"):
+        """Registers a standardized health/readiness probe endpoint for Kubernetes / clouds."""
+        @self.universal_tool(path=path, expose=ExposureMode.BOTH, tool_type=ToolSafetyLevel.READ_ONLY)
+        def health_probe():
+            return {
+                "status": "healthy",
+                "service": self.name,
+                "version": self.version,
+                "mode": self.mode.value,
+            }
+        return health_probe
+
+    def _create_rest_endpoint_wrapper(self, ep: dict) -> Callable[..., Any]:
+        """Creates an execution wrapper for REST endpoints that executes plugin interceptors."""
+        func = ep["func"]
+        tool_name = ep["name"]
+        tool_type = ep["tool_type"]
+
+        @functools.wraps(func)
+        async def rest_wrapper(*args, **kwargs):
+            if not self.plugins.plugins:
+                if inspect.iscoroutinefunction(func):
+                    return await func(*args, **kwargs)
+                return await run_in_threadpool(func, *args, **kwargs)
+
+            request_id = str(uuid.uuid4())
+            ctx = NexusContext(
+                transport="rest",
+                tool_name=tool_name,
+                request_id=request_id,
+                metadata={"tool_type": tool_type.value},
+            )
+
+            try:
+                await self.plugins.trigger_before_execute(ctx, kwargs)
+
+                if inspect.iscoroutinefunction(func):
+                    res = await func(*args, **kwargs)
+                else:
+                    res = await run_in_threadpool(func, *args, **kwargs)
+
+                ctx.mark_completed()
+                res = await self.plugins.trigger_after_execute(ctx, res)
+                return res
+            except Exception as e:
+                ctx.mark_completed()
+                await self.plugins.trigger_on_error(ctx, e)
+                raise
+
+        return rest_wrapper
 
     # ─────────────────────────────────────────────
     # LIFESPAN INTEGRATION FOR MICROSERVICES
     # ─────────────────────────────────────────────
-    def get_lifespan(self, external_lifespan: Optional[Callable[..., Any]] = None):
+    def get_lifespan(self, external_lifespan: Callable[..., Any] | None = None):
         """
         Returns a composed lifespan asynccontextmanager that runs FastMCP's task group
         alongside any existing application lifespan (e.g. database connections).
-
-        Usage:
-            app = FastAPI(lifespan=nexus.get_lifespan(my_db_lifespan))
+        Reuses the exact same FastMCP ASGI instance as the mount.
         """
-        mcp_app = self.mcp.http_app()
+        mcp_app = self._get_or_create_mcp_app()
 
         @asynccontextmanager
         async def composed(app: FastAPI):
-            async with mcp_app.lifespan(app):
-                if external_lifespan:
-                    async with external_lifespan(app):
+            await self.plugins.trigger_startup(self)
+            try:
+                async with mcp_app.lifespan(app):
+                    if external_lifespan:
+                        async with external_lifespan(app):
+                            yield
+                    else:
                         yield
-                else:
-                    yield
+            finally:
+                await self.plugins.trigger_shutdown()
 
         return composed
 
@@ -362,76 +793,73 @@ class UnifiedNexus:
         app: FastAPI,
         api_prefix: str = "",
         mcp_path: str = "/",
-        mode: Optional[Union[str, ExposureMode]] = None,
-        expose: Optional[Union[str, ExposureMode]] = None,
+        mode: str | ExposureMode | None = None,
+        expose: str | ExposureMode | None = None,
     ) -> FastAPI:
         """
-        Mounts / attaches UnifiedNexus routes, routers, and FastMCP to an existing FastAPI application.
-        Ideal for industry-standard microservices with existing FastAPI app instances.
-
-        Args:
-            app:        The existing FastAPI application.
-            api_prefix: Optional URL prefix for REST routes (e.g. '/api/v1').
-            mcp_path:   Mount path for the FastMCP application (default '/').
-            mode:       Exposure mode override ('both', 'api', or 'mcp').
-            expose:     Alias for `mode`.
-
-        Returns:
-            The configured FastAPI application.
+        Mounts UnifiedNexus routes, routers, and FastMCP to an existing FastAPI application.
+        Preserves existing app lifespans and prevents accidental REST exposure of MCP-only routers.
         """
         active_mode = normalize_exposure(expose or mode or self.mode)
         self.api = app
 
-        # Scan any routers with expose in BOTH or MCP to ensure routes are registered as MCP tools
-        if active_mode in (ExposureMode.BOTH, ExposureMode.MCP):
-            for r in self._routers:
-                if r["expose"] in (ExposureMode.BOTH, ExposureMode.MCP):
-                    self._register_router_to_mcp(r["router"])
+        clean_api_prefix = api_prefix.rstrip("/") if api_prefix else ""
 
-        # 1. Register REST routes & routers if mode includes API
+        # 1. Register REST routes & routers if active_mode includes API
         if active_mode in (ExposureMode.BOTH, ExposureMode.API):
-            clean_api_prefix = api_prefix.rstrip("/") if api_prefix else ""
-
             for ep in self._endpoints:
                 if ep["expose"] in (ExposureMode.BOTH, ExposureMode.API) and ep.get("path"):
                     clean_path = ep["path"] if ep["path"].startswith("/") else "/" + ep["path"]
                     full_path = f"{clean_api_prefix}{clean_path}" if clean_api_prefix else clean_path
                     target = ep["router"] if ep["router"] else app
+
+                    dependencies = []
+                    if self.rest_auth is not None:
+                        dependencies.append(self.rest_auth)
+
                     target.add_api_route(
                         path=full_path,
-                        endpoint=ep["func"],
+                        endpoint=self._create_rest_endpoint_wrapper(ep),
                         methods=ep["methods"],
                         operation_id=ep["name"],
                         tags=ep["tags"],
                         summary=ep["summary"],
+                        dependencies=dependencies or None,
                     )
 
+            # Strictly include only routers configured for BOTH or API (NEVER MCP-only)
             for r in self._routers:
-                clean_r_prefix = r["prefix"] if r["prefix"].startswith("/") else ("/" + r["prefix"] if r["prefix"] else "")
-                full_r_prefix = f"{clean_api_prefix}{clean_r_prefix}" if clean_api_prefix else clean_r_prefix
-                app.include_router(
-                    r["router"],
-                    prefix=full_r_prefix,
-                    tags=r["tags"],
-                )
+                if r["expose"] in (ExposureMode.BOTH, ExposureMode.API):
+                    clean_r_prefix = r["prefix"] if r["prefix"].startswith("/") else ("/" + r["prefix"] if r["prefix"] else "")
+                    full_r_prefix = f"{clean_api_prefix}{clean_r_prefix}" if clean_api_prefix else clean_r_prefix
+                    app.include_router(
+                        r["router"],
+                        prefix=full_r_prefix,
+                        tags=r["tags"],
+                    )
 
-        # 2. Mount FastMCP and compose lifespan if mode includes MCP
+        # 2. Mount FastMCP and compose lifespan if active_mode includes MCP
         if active_mode in (ExposureMode.BOTH, ExposureMode.MCP):
-            mcp_app = self.mcp.http_app()
+            mcp_app = self._get_or_create_mcp_app(mcp_path)
+            clean_mount = mcp_path.rstrip("/") if mcp_path and mcp_path != "/" else "/"
+
             original_lifespan = app.router.lifespan_context
 
             @asynccontextmanager
             async def composed_lifespan(target_app: FastAPI):
-                async with mcp_app.lifespan(target_app):
-                    if original_lifespan:
-                        async with original_lifespan(target_app):
+                await self.plugins.trigger_startup(self)
+                try:
+                    async with mcp_app.lifespan(target_app):
+                        if original_lifespan:
+                            async with original_lifespan(target_app):
+                                yield
+                        else:
                             yield
-                    else:
-                        yield
+                finally:
+                    await self.plugins.trigger_shutdown()
 
             app.router.lifespan_context = composed_lifespan
-            app.mount(mcp_path, mcp_app)
-
+            app.mount(clean_mount, mcp_app)
 
         # 3. Attach middlewares
         for middleware_class, kwargs in self._middlewares:
@@ -439,7 +867,6 @@ class UnifiedNexus:
 
         return app
 
-    # Ergonomic aliases
     mount_to = attach_to
     mount = attach_to
 
@@ -448,27 +875,15 @@ class UnifiedNexus:
     # ─────────────────────────────────────────────
     def finalize(
         self,
-        app: Optional[FastAPI] = None,
-        expose: Optional[Union[str, ExposureMode]] = None,
-        mode: Optional[Union[str, ExposureMode]] = None,
+        app: FastAPI | None = None,
+        expose: str | ExposureMode | None = None,
+        mode: str | ExposureMode | None = None,
         api_prefix: str = "",
         mcp_path: str = "/",
     ) -> FastAPI:
         """
         Builds the unified ASGI app (FastAPI + FastMCP) based on the exposure mode.
         If an existing app was provided, attaches to it.
-
-        Args:
-            app:        Optional existing FastAPI app instance.
-            expose:     Override exposure mode ('both', 'api', or 'mcp').
-            mode:       Alias for `expose`.
-            api_prefix: Optional prefix for REST routes (when attaching to existing app).
-            mcp_path:   Mount path for MCP (when attaching to existing app).
-
-        Modes:
-            - 'both': Exposes both REST API endpoints and MCP endpoint (default).
-            - 'api':  Exposes ONLY REST API endpoints. MCP is not mounted.
-            - 'mcp':  Exposes ONLY MCP endpoint. REST routes & docs are disabled.
         """
         target_app = app or self._existing_app
         if target_app is not None:
@@ -482,14 +897,8 @@ class UnifiedNexus:
 
         active_mode = normalize_exposure(expose or mode or self.mode)
 
-        # Scan router endpoints to FastMCP if applicable
-        if active_mode in (ExposureMode.BOTH, ExposureMode.MCP):
-            for r in self._routers:
-                if r["expose"] in (ExposureMode.BOTH, ExposureMode.MCP):
-                    self._register_router_to_mcp(r["router"])
-
         # 1. MCP app & Lifespan
-        mcp_app = self.mcp.http_app() if active_mode in (ExposureMode.BOTH, ExposureMode.MCP) else None
+        mcp_app = self._get_or_create_mcp_app(mcp_path) if active_mode in (ExposureMode.BOTH, ExposureMode.MCP) else None
 
         @asynccontextmanager
         async def combined_lifespan(app_inst: FastAPI):
@@ -502,17 +911,21 @@ class UnifiedNexus:
             print(f"🚀  {self.name.upper()} v{self.version} ACTIVE [{banner_mode}]")
             print("=" * 60)
             if active_mode in (ExposureMode.BOTH, ExposureMode.API):
-                print(f"🌐  REST Docs  → http://localhost:8000/docs")
+                print("🌐  REST Docs  → http://localhost:8000/docs")
             if active_mode in (ExposureMode.BOTH, ExposureMode.MCP):
-                print(f"🤖  MCP       → http://localhost:8000/mcp")
-                print(f"🔍  Inspector → npx -y @modelcontextprotocol/inspector http://localhost:8000/mcp")
+                print("🤖  MCP       → http://localhost:8000/mcp")
+                print("🔍  Inspector → npx -y @modelcontextprotocol/inspector http://localhost:8000/mcp")
             print("-" * 60)
 
-            if mcp_app:
-                async with mcp_app.lifespan(app_inst):
+            await self.plugins.trigger_startup(self)
+            try:
+                if mcp_app:
+                    async with mcp_app.lifespan(app_inst):
+                        yield
+                else:
                     yield
-            else:
-                yield
+            finally:
+                await self.plugins.trigger_shutdown()
 
         # 2. Main FastAPI app
         fastapi_kwargs = {
@@ -538,25 +951,33 @@ class UnifiedNexus:
             for ep in self._endpoints:
                 if ep["expose"] in (ExposureMode.BOTH, ExposureMode.API) and ep.get("path"):
                     target = ep["router"] if ep["router"] else self.api
+                    dependencies = []
+                    if self.rest_auth is not None:
+                        dependencies.append(self.rest_auth)
+
                     target.add_api_route(
                         path=ep["path"],
-                        endpoint=ep["func"],
+                        endpoint=self._create_rest_endpoint_wrapper(ep),
                         methods=ep["methods"],
                         operation_id=ep["name"],
                         tags=ep["tags"],
                         summary=ep["summary"],
+                        dependencies=dependencies or None,
                     )
 
+            # Strictly include only routers configured for BOTH or API (NEVER MCP-only)
             for r in self._routers:
-                self.api.include_router(
-                    r["router"],
-                    prefix=r["prefix"],
-                    tags=r["tags"],
-                )
+                if r["expose"] in (ExposureMode.BOTH, ExposureMode.API):
+                    self.api.include_router(
+                        r["router"],
+                        prefix=r["prefix"],
+                        tags=r["tags"],
+                    )
 
         # 5. Mount MCP if mode includes MCP
         if active_mode in (ExposureMode.BOTH, ExposureMode.MCP) and mcp_app:
-            self.api.mount("/", mcp_app)
+            clean_mount = mcp_path.rstrip("/") if mcp_path and mcp_path != "/" else "/"
+            self.api.mount(clean_mount, mcp_app)
 
         return self.api
 
@@ -567,11 +988,7 @@ class UnifiedNexus:
         port: int = 8000,
         **kwargs,
     ):
-        """
-        Runs the server.
-        If transport='stdio', runs the FastMCP stdio server directly.
-        If transport='http', runs the unified ASGI app using uvicorn.
-        """
+        """Runs the server (stdio transport or HTTP via uvicorn)."""
         if transport == "stdio":
             self.mcp.run(transport="stdio", **kwargs)
         else:
@@ -580,4 +997,22 @@ class UnifiedNexus:
             uvicorn.run(app, host=host, port=port, **kwargs)
 
 
-__all__ = ["UnifiedNexus", "ExposureMode", "normalize_exposure"]
+__all__ = [
+    "AuthorizationError",
+    "ConcurrencyLimitError",
+    "DuplicateRouteError",
+    "DuplicateToolError",
+    "ExposureMode",
+    "HumanApprovalRequiredError",
+    "NexusContext",
+    "NexusPlugin",
+    "PayloadTooLargeError",
+    "PluginManager",
+    "RateLimitExceededError",
+    "SecurityConfigurationError",
+    "ToolSafetyLevel",
+    "ToolTimeoutError",
+    "UnifiedNexus",
+    "UnifiedNexusError",
+    "normalize_exposure",
+]

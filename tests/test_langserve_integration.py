@@ -1,5 +1,6 @@
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
 import pytest
@@ -10,9 +11,10 @@ from fastapi.testclient import TestClient
 langserve = pytest.importorskip("langserve", reason="langserve is required for this test")
 langchain_core = pytest.importorskip("langchain_core", reason="langchain_core is required for this test")
 
-from langserve import add_routes
 from langchain_core.runnables import RunnableLambda
+from langserve import add_routes
 from pydantic import BaseModel
+
 from unified_nexus import UnifiedNexus
 
 

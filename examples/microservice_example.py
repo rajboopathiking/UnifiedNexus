@@ -5,16 +5,19 @@ Demonstrates how to seamlessly mount UnifiedNexus onto an existing FastAPI micro
 providing fine-grained exposure control (API only, MCP only, or both) and versioned routing.
 """
 
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, APIRouter, Depends
-from pydantic import BaseModel, Field
-import uvicorn
 
-from unified_nexus import UnifiedNexus, ExposureMode
+import uvicorn
+from fastapi import APIRouter, Depends, FastAPI
+from pydantic import BaseModel, Field
+
+from unified_nexus import UnifiedNexus
+
 
 # ── 1. Existing Production Microservice Setup ─────────────────────────────
 @asynccontextmanager
@@ -51,22 +54,21 @@ class OrderRequest(BaseModel):
 
 # [OPTION 1: BOTH] Exposed to Web/Mobile REST clients AND AI Agents via MCP
 @nexus.universal_tool(path="/orders", expose="both", tags=["Orders"])
-def create_order(req: OrderRequest, db: str = Depends(get_db)):
+def create_order(req: OrderRequest):
     """Creates a new customer order. Accessible via REST and by AI agents."""
     return {
         "order_id": "ORD-9821",
         "customer": req.customer_id,
         "item": req.item_id,
         "quantity": req.quantity,
-        "db_session": db,
         "status": "CONFIRMED",
     }
 
-# [OPTION 2: API ONLY] Traditional REST endpoint (hidden from AI agents)
+# [OPTION 2: API ONLY] Traditional REST endpoint with FastAPI Depends()
 @nexus.api_only(path="/admin/audit-log", tags=["Admin"])
-def get_audit_log():
-    """Internal admin log for human operators. Not exposed to AI agents."""
-    return {"logs": ["admin logged in", "config updated"]}
+def get_audit_log(db: str = Depends(get_db)):
+    """Internal admin log for human operators with DB session. Not exposed to AI agents."""
+    return {"logs": ["admin logged in", "config updated"], "db": db}
 
 # [OPTION 3: MCP ONLY] AI Agent tool (not routed as an HTTP endpoint)
 @nexus.mcp_only

@@ -7,12 +7,14 @@ Demonstrates:
 - Using docstrings and Pydantic Field descriptions for Swagger and AI agents.
 """
 
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
 import uvicorn
 from pydantic import BaseModel, Field
+
 from unified_nexus import UnifiedNexus
 
 nexus = UnifiedNexus("QuickstartApp", version="1.0.0")

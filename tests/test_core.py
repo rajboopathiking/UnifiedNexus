@@ -1,12 +1,12 @@
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
-import pytest
 from fastapi.testclient import TestClient
-from unified_nexus import UnifiedNexus
-from pydantic import BaseModel 
+from pydantic import BaseModel
 
+from unified_nexus import UnifiedNexus
 
 nexus = UnifiedNexus("TestApp")
 

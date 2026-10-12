@@ -1,12 +1,15 @@
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
-import pytest
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, APIRouter, Depends
+
+import pytest
+from fastapi import APIRouter, Depends, FastAPI
 from fastapi.testclient import TestClient
-from unified_nexus import UnifiedNexus, ExposureMode
+
+from unified_nexus import UnifiedNexus
 
 
 def test_attach_to_existing_fastapi_app():
@@ -133,36 +136,32 @@ def test_lifespan_preservation_on_attach():
     assert db_state["connected"] is False
 
 
-@pytest.mark.asyncio
-async def test_dependency_injection_resolution_in_mcp():
+def test_unsupported_depends_rejected_in_mcp():
+    from unified_nexus import SecurityConfigurationError
+
     def get_db_session():
         return "mock_postgres_session"
 
-    async def get_async_auth():
-        return "user_id_42"
-
     nexus = UnifiedNexus("DepApp")
 
-    @nexus.universal_tool(path="/profile", expose="both")
-    async def get_profile(
-        db: str = Depends(get_db_session),
-        user_id: str = Depends(get_async_auth),
-    ):
-        return {"db": db, "user": user_id}
+    # 1. Attempting to expose FastAPI Depends to MCP raises SecurityConfigurationError
+    with pytest.raises(SecurityConfigurationError) as exc_info:
+        @nexus.universal_tool(path="/profile", expose="both")
+        async def get_profile_insecure(db_conn: str = Depends(get_db_session)):
+            return {"db": db_conn}
 
-    app = nexus.finalize()
+    assert "FastAPI dependency injection" in str(exc_info.value)
 
-    # Test via HTTP
+    # 2. Endpoints with Depends are safely supported via expose='api' or @nexus.api_only
+    @nexus.api_only(path="/profile-api")
+    def get_profile_safe(db_conn: str = Depends(get_db_session)):
+        return {"db": db_conn}
+
+    app = nexus.finalize(mode="api")
     with TestClient(app) as client:
-        res = client.get("/profile")
+        res = client.get("/profile-api")
         assert res.status_code == 200
-        assert res.json() == {"db": "mock_postgres_session", "user": "user_id_42"}
-
-    # Test via FastMCP tool call
-    tool = await nexus.mcp.get_tool("get_profile")
-    result = await tool.run({})
-    assert "mock_postgres_session" in str(result)
-    assert "user_id_42" in str(result)
+        assert res.json() == {"db": "mock_postgres_session"}
 
 
 def test_constructor_app_binding():

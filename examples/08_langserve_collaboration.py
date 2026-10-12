@@ -12,17 +12,18 @@ The Killer Advantage:
     5. Single process, single port, shared database lifespans, zero drift!
 """
 
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
 import uvicorn
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
 
 # LangChain & LangServe imports
 from langchain_core.runnables import RunnableLambda
 from langserve import add_routes
+from pydantic import BaseModel, Field
 
 from unified_nexus import UnifiedNexus
 

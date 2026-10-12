@@ -1,14 +1,17 @@
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from fastapi import UploadFile, Request, Response
+from fastapi import Request, UploadFile
 from fastapi.testclient import TestClient
-from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
-from unified_nexus import UnifiedNexus, ExposureMode
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from unified_nexus import UnifiedNexus
 
 
 class SampleModel(BaseModel):

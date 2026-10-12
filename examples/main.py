@@ -1,9 +1,11 @@
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
 import uvicorn
 from pydantic import BaseModel, Field
+
 from unified_nexus import UnifiedNexus
 
 # Application-level exposure control: "both" (default), "api", or "mcp"

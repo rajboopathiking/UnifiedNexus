@@ -7,14 +7,17 @@ Demonstrates:
 - Using api_prefix for clean microservice versioning (e.g. /api/v1).
 """
 
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends
-from pydantic import BaseModel
+
 import uvicorn
+from fastapi import FastAPI
+from pydantic import BaseModel
+
 from unified_nexus import UnifiedNexus
 
 # 1. Existing Production Microservice Application with custom lifespan

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - 2026-10-12
+
+### Added
+- **Plugin Architecture & Lifecycle Hooks**:
+  - `NexusPlugin` protocol with `startup()`, `before_execute()`, `after_execute()`, `on_error()`, and `shutdown()`.
+  - `nexus.add_plugin(plugin)` for intercepting both REST and MCP requests with a single plugin.
+  - `NexusContext` capturing transport (`'rest'` | `'mcp'`), request/correlation ID, tool name, verified caller principal, permissions, and duration.
+- **Enterprise Security & Boundaries**:
+  - Rejection of unsupported FastAPI `Depends()` and `Security()` defaults in MCP tools via `SecurityConfigurationError`.
+  - Blocked sensitive credential parameters (`password`, `token`, `secret`, `api_key`) from LLM tool argument exposure.
+  - Rejection of routers with router-level security dependencies from silent/unauthenticated MCP exposure.
+  - Duplicate tool name detection (`DuplicateToolError`) and duplicate REST route detection (`DuplicateRouteError`).
+  - Automatic secret and credential redaction from internal exception traces and logs.
+  - Dedicated `rest_auth` parameter on `UnifiedNexus` for REST API boundary security.
+- **AI-Agent Safety Invariants**:
+  - `ToolSafetyLevel` classification (`READ_ONLY`, `ACTION`, `DESTRUCTIVE`).
+  - Human approval hooks (`approval_hook`) and per-tool `requires_approval` flags for destructive operations.
+  - Idempotency declaration (`idempotent=True`) for safe AI agent retries on side-effecting operations.
+  - Bounded input string sizes (`max_input_chars`) and safe output truncation (`max_output_chars`).
+  - Concurrency limiting via `asyncio.Semaphore` and configurable per-tool timeouts.
+  - Non-blocking execution of synchronous tools in Starlette's threadpool (`run_in_threadpool`).
+- **MCP Transport Normalization**:
+  - Normalization of external mount paths eliminating `/mcp/mcp` duplication across both `/` and `/mcp` mounts.
+  - Strict preservation of parent FastAPI lifespans (executing exactly once on startup and shutdown).
+  - Single ASGI sub-application reuse across both mounting and lifespan context management.
+- **Testing & Quality**:
+  - 41 automated unit, integration, and security regression tests passing with 100% pass rate.
+  - Full GitHub Actions CI workflow (`.github/workflows/ci.yml`) testing Python 3.11 and 3.12, linting with Ruff, building distribution, and validating wheel install.
+  - End-to-end AI Customer Support Agent proof-of-concept testing three realistic scenarios across REST and MCP.
+
+---
+
 ## [0.1.3] - 2026-10-12
 
 ### Added

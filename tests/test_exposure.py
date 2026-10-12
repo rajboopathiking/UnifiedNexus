@@ -1,11 +1,12 @@
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
-from unified_nexus import UnifiedNexus, ExposureMode, normalize_exposure
+
+from unified_nexus import ExposureMode, UnifiedNexus, normalize_exposure
 
 
 def test_normalize_exposure():

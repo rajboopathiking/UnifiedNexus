@@ -1,26 +1,28 @@
 """
-04_middleware_and_security.py — Shared Middleware & Error Recovery
+04_middleware_and_security.py — HTTP Middleware, MCP Authorization & Secret Redaction
 
 Demonstrates:
-- Adding Starlette/FastAPI middleware (CORS, timing headers, custom auth).
-- Shared middleware protection across both HTTP REST and FastMCP endpoints.
-- LLM-friendly structured error handling with recovery hints.
+- Adding Starlette/FastAPI middleware (CORS, timing headers) to protect HTTP traffic.
+- Understanding the boundary: HTTP middleware protects REST endpoints and /mcp HTTP transport, while FastMCP auth providers protect MCP tool execution.
+- LLM-friendly structured error handling with recovery hints and automatic secret redaction.
 """
 
-import sys
 import os
+import sys
 import time
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 
 import uvicorn
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from fastapi.middleware.cors import CORSMiddleware
-from unified_nexus import UnifiedNexus
 
-nexus = UnifiedNexus("SecureApp")
+from unified_nexus import ToolSafetyLevel, UnifiedNexus
 
-# 1. Standard CORS Middleware
+nexus = UnifiedNexus("SecureApp", mask_error_details=True)
+
+# 1. Standard CORS Middleware (Applies to all HTTP traffic including REST and /mcp)
 nexus.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,17 +42,25 @@ class TimingMiddleware(BaseHTTPMiddleware):
 
 nexus.add_middleware(TimingMiddleware)
 
-# 3. Tool with self-correcting error handling
-@nexus.universal_tool(path="/divide")
+# 3. Tool with self-correcting error handling and secret redaction
+@nexus.universal_tool(path="/divide", tool_type=ToolSafetyLevel.READ_ONLY, idempotent=True)
 def safe_divide(numerator: float, denominator: float):
     """
     Divides two numbers.
     If an error occurs (e.g. division by zero), UnifiedNexus returns a structured
-    hint helping LLM agents to self-correct automatically.
+    hint helping LLM agents to self-correct automatically without exposing internal exceptions.
     """
     if denominator == 0:
         raise ValueError("Cannot divide by zero. Please pass a non-zero denominator.")
     return {"result": numerator / denominator}
+
+# 4. Tool demonstrating secret redaction
+@nexus.universal_tool(path="/query-database", tool_type=ToolSafetyLevel.READ_ONLY)
+def query_database(query: str):
+    """Demonstrates that even if database connection strings fail, credentials are never returned."""
+    # Simulating connection error with sensitive credentials
+    raise RuntimeError("Connection failed to postgresql://dbuser:super_secret_pw@10.0.0.1:5432/analytics")
+
 
 app = nexus.finalize()
 
