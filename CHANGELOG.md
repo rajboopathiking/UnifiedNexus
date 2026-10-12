@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.1] - 2026-10-13
+
+### Fixed & Hardened (Production-Ready Release)
+- **Atomic Redis Ownership Verification & Lua Scripting**:
+  - Replaced GET-then-modify operations in `RedisIdempotencyBackend` with atomic server-side Lua scripts (`LUA_COMPLETE`, `LUA_RELEASE`).
+  - Stale or expired workers can never delete a newly claimed lock or overwrite another worker's completed cached record.
+  - Added millisecond-precision lock timeouts via Redis `SET NX PX`.
+- **In-Memory Concurrency Waiter Deduplication**:
+  - Implemented bounded recheck loop in `IdempotencyCache.acquire_or_get`. When an in-flight reservation is released or fails, exactly ONE waiter acquires the key (`ACQUIRED`), while all other waiters wait on the replacement reservation and return `CACHED` upon completion, eliminating duplicate executions.
+- **In-Memory Pending Lock Expiry**:
+  - Enforced `lock_timeout` on `PENDING` records in `IdempotencyCache`. Abandoned or crashed operations automatically expire and clear.
+- **Unambiguous Identity Encoding**:
+  - Canonicalized tenant and user identifiers in `compute_caller_identity` using percent-encoding, preventing delimiter collision (such as inputs containing `:user:`) and ensuring mathematically distinct tenant/user isolation.
+- **Live Redis Testing & CI Parity**:
+  - Added live Redis Lua concurrency and expiration test suite using `fakeredis[lua]`.
+  - Configured CI matrix on Python 3.11 and 3.12 with all 67 tests passing.
+
+---
+
 ## [0.2.0] - 2026-10-12
 
 ### Added
