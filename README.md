@@ -171,6 +171,18 @@ nexus.add_plugin(ComplianceAuditPlugin())
 
 ---
 
+## 🚀 Production Deployment & Readiness
+
+UnifiedNexus v0.2.2 is hardened for production multi-worker environments:
+
+- **Distributed Redis Idempotency**: Use `RedisIdempotencyBackend` with Redis `EVAL` support. Atomic Lua scripts (`LUA_COMPLETE`, `LUA_RELEASE`) govern key lifecycle fail-closed, ensuring that stale workers can never hijack replacement locks.
+- **Post-Execution Failure Retention**: If a side-effecting action succeeds but result persistence or network transport fails, the reservation is retained, preventing automated agent retries from executing duplicate charges or mutations.
+- **End-to-End Exactly-Once Semantics**: Forward `ctx.durable_idempotency_key` (`f"{caller_id}:{tool_name}:{idempotency_key}"`) to downstream transactional services (e.g. Stripe, SQL database with unique constraints) for durable deduplication beyond Redis key expiration.
+
+📘 For the complete architecture guide and configuration checklist, see the **[Production Deployment Guide](docs/production-deployment.md)**.
+
+---
+
 ## ⚙️ Exposure Control: App & Tool Levels
 
 ### 1. App-Level Exposure
