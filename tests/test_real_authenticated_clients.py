@@ -392,9 +392,9 @@ async def test_live_fakeredis_lua_atomic_concurrency_and_expiration():
     3. Stale complete cannot overwrite an already COMPLETED record.
     4. Expired locks can be recovered safely without race conditions.
     """
-    import fakeredis.aioredis
+    fakeredis = pytest.importorskip("fakeredis.aioredis", reason="fakeredis is required for live redis tests")
 
-    fake_client = fakeredis.aioredis.FakeRedis()
+    fake_client = fakeredis.FakeRedis()
     backend = RedisIdempotencyBackend(redis_client=fake_client, ttl_seconds=300.0, lock_timeout=0.1)
 
     # 1. Initial acquire
