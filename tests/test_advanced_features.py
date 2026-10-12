@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 from fastapi import Request, UploadFile
 from fastapi.testclient import TestClient
+from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -81,10 +82,9 @@ async def test_llm_friendly_error_formatting():
         return {"val": a / b}
 
     tool = await nexus.mcp.get_tool("divide")
-    err_res = await tool.run({"a": 10, "b": 0})
-    result_str = str(err_res)
-    assert "error" in result_str
-    assert "hint" in result_str
+    with pytest.raises(ToolError) as exc_info:
+        await tool.run({"a": 10, "b": 0})
+    result_str = str(exc_info.value)
     assert "division by zero" in result_str
 
 

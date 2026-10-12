@@ -99,7 +99,17 @@ nexus = UnifiedNexus(
 
 ---
 
-## 5. Secret & Credential Redaction
+## 5. Caller Anti-Spoofing & Fail-Closed Authorization
+
+To protect against agent prompt-injection and caller argument tampering:
+- **No Caller-Controlled Role Arguments**: Tool parameters named `role`, `caller_role`, `user_id`, or `principal` are **never** trusted for authorization.
+- **Trusted Context & Authorization Hooks**: Identity and roles must be derived from trusted authentication tokens via `ctx.principal`, `ctx.permissions`, or an explicit `authorize_hook(ctx, tool_name, roles, scopes)`.
+- **Inherited Router Auth**: When `nexus.include_router(router)` is mounted via `attach_to()` or `finalize()`, `rest_auth` dependencies are propagated automatically to all included REST routes.
+- **Fail-Closed Policy**: If any rate limit or authorization hook encounters an error, execution immediately fails closed with `RateLimitExceededError` or `AuthorizationError`.
+
+---
+
+## 6. Secret & Credential Redaction
 
 UnifiedNexus automatically sanitizes error traces and tool outputs to prevent secret leakage:
 - PostgreSQL / MySQL connection strings: `postgres://user:***@host/db`

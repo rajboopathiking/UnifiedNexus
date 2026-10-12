@@ -102,12 +102,10 @@ class TicketPayload(BaseModel):
 @nexus.universal_tool(
     path="/tickets/create",
     tool_type=ToolSafetyLevel.ACTION,
-    roles=["support_agent", "customer", "admin"],
+    idempotent=True,
 )
-def create_ticket(ticket: TicketPayload, caller_role: str = "customer") -> dict:
+def create_ticket(ticket: TicketPayload) -> dict:
     """Creates a support ticket with input validation and idempotent retries."""
-    if caller_role not in ["support_agent", "customer", "admin"]:
-        raise AuthorizationError(f"Role '{caller_role}' is not authorized to create support tickets.")
 
     # Idempotent deduplication check
     if ticket.idempotency_key and ticket.idempotency_key in TICKETS:

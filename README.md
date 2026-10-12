@@ -163,7 +163,7 @@ nexus.add_plugin(ComplianceAuditPlugin())
 | :--- | :--- | :--- |
 | **Tool Safety Levels** | `tool_type=ToolSafetyLevel.READ_ONLY \| ACTION \| DESTRUCTIVE` | Explicit capability classification |
 | **Human Approval** | `approval_hook=...` or `requires_approval=True` | Destructive tools require confirmation |
-| **Idempotency** | `idempotent=True` | Safe automated retries for AI agents |
+| **Idempotency & Deduplication** | `idempotent=True` / `IdempotencyCache` | Safe retries & in-memory response deduplication |
 | **Bounded Payloads** | `max_input_chars=100_000`, `max_output_chars=50_000` | Prevents prompt-injection context overflow |
 | **Secrets Redaction** | `sanitize_message()` | Passwords, tokens, DB URLs masked with `***` |
 | **Threadpool Sync** | `run_in_threadpool` | Slow synchronous tools never block async event loop |

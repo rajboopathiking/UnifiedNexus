@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-10-12
 
 ### Added
+- **Unified Execution Pipeline**:
+  - Centralized `_execute_unified_pipeline()` for identical execution semantics across REST and MCP transports.
+  - Strict policy parity: timeout cancellation, concurrency semaphores, rate limiting, bounded input/output, and human approval verification enforced equally across both transports.
+- **Fail-Closed Authorization & Anti-Spoofing**:
+  - Complete elimination of caller-controlled role arguments (`role`, `caller_role`, `user_id`, `principal`) from authorization decisions. Caller identity is exclusively derived from verified token context (`ctx.principal`, `ctx.permissions`) or an application `authorize_hook`.
+  - Blocked `__approved__=True` backdoor; destructive actions unconditionally require a registered application `approval_hook`.
+  - Rate limiting hooks fail closed (`RateLimitExceededError`) on any hook exceptions.
+  - Router-level security dependencies (`rest_auth`) automatically propagate to included routers in both `attach_to()` and `finalize()`.
+- **In-Memory Idempotency Deduplication**:
+  - `IdempotencyCache` for thread-safe caching of idempotent tool calls by `tool_name:idempotency_key` with configurable TTL and LRU eviction, preventing duplicate AI-agent side effects on retries.
 - **Plugin Architecture & Lifecycle Hooks**:
   - `NexusPlugin` protocol with `startup()`, `before_execute()`, `after_execute()`, `on_error()`, and `shutdown()`.
   - `nexus.add_plugin(plugin)` for intercepting both REST and MCP requests with a single plugin.
@@ -21,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Duplicate tool name detection (`DuplicateToolError`) and duplicate REST route detection (`DuplicateRouteError`).
   - Automatic secret and credential redaction from internal exception traces and logs.
   - Dedicated `rest_auth` parameter on `UnifiedNexus` for REST API boundary security.
+  - Native FastMCP error signaling via `ToolError` (ensuring `isError: true` JSON-RPC response).
 - **AI-Agent Safety Invariants**:
   - `ToolSafetyLevel` classification (`READ_ONLY`, `ACTION`, `DESTRUCTIVE`).
   - Human approval hooks (`approval_hook`) and per-tool `requires_approval` flags for destructive operations.
@@ -33,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Strict preservation of parent FastAPI lifespans (executing exactly once on startup and shutdown).
   - Single ASGI sub-application reuse across both mounting and lifespan context management.
 - **Testing & Quality**:
-  - 41 automated unit, integration, and security regression tests passing with 100% pass rate.
+  - 48 automated unit, integration, and security regression tests passing with 100% pass rate.
   - Full GitHub Actions CI workflow (`.github/workflows/ci.yml`) testing Python 3.11 and 3.12, linting with Ruff, building distribution, and validating wheel install.
   - End-to-end AI Customer Support Agent proof-of-concept testing three realistic scenarios across REST and MCP.
 

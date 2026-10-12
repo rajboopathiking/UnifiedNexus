@@ -3,8 +3,10 @@ Security and AI-Agent Safety utilities for UnifiedNexus.
 Enforces parameter safety, tool classification, secret redaction, and bounded I/O.
 """
 
+import asyncio
 import json
 import re
+import time
 from enum import Enum
 from typing import Any
 
@@ -35,6 +37,8 @@ SENSITIVE_PARAM_NAMES: set[str] = {
     "session_id",
     "credentials",
     "current_user",
+    "caller_role",
+    "__approved__",
     "db",
     "db_session",
     "session",
@@ -129,3 +133,34 @@ def bound_output(result: Any, max_chars: int) -> Any:
         pass
 
     return result
+
+
+class IdempotencyCache:
+    """Thread-safe and async-safe in-memory cache for deduplicating idempotent operations."""
+
+    def __init__(self, maxsize: int = 1000, ttl_seconds: float = 3600.0):
+        self._cache: dict[str, tuple[float, Any]] = {}
+        self._maxsize = maxsize
+        self._ttl = ttl_seconds
+        self._lock = asyncio.Lock()
+
+    async def get(self, key: str) -> tuple[bool, Any]:
+        async with self._lock:
+            if key not in self._cache:
+                return False, None
+            ts, val = self._cache[key]
+            if time.time() - ts > self._ttl:
+                del self._cache[key]
+                return False, None
+            return True, val
+
+    async def set(self, key: str, value: Any) -> None:
+        async with self._lock:
+            if len(self._cache) >= self._maxsize:
+                oldest_key = min(self._cache, key=lambda k: self._cache[k][0])
+                del self._cache[oldest_key]
+            self._cache[key] = (time.time(), value)
+
+    def clear(self) -> None:
+        self._cache.clear()
+

@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from enum import Enum
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, Request, Response, UploadFile
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response, UploadFile
 from fastapi.params import Depends as DependsParam
 from fastapi.routing import APIRoute
 
@@ -43,6 +43,7 @@ from unified_nexus.exceptions import (
 )
 from unified_nexus.plugins import NexusPlugin, PluginManager
 from unified_nexus.security import (
+    IdempotencyCache,
     ToolSafetyLevel,
     bound_output,
     check_input_bounds,
@@ -167,6 +168,7 @@ class UnifiedNexus:
         self.api = app
         self._mcp_app: Any | None = None
         self.plugins = PluginManager()
+        self._idempotency_cache = IdempotencyCache()
 
     def add_plugin(self, plugin: NexusPlugin) -> None:
         """Registers an extensible plugin for UnifiedNexus."""
@@ -210,6 +212,229 @@ class UnifiedNexus:
 
         self._mcp_app = self.mcp.http_app(path=internal_path)
         return self._mcp_app
+
+    # ─────────────────────────────────────────────
+    # UNIFIED EXECUTION PIPELINE (SHARED REST & MCP)
+    # ─────────────────────────────────────────────
+    async def _execute_unified_pipeline(
+        self,
+        ctx: NexusContext,
+        func: Callable[..., Any],
+        args: tuple,
+        kwargs: dict,
+        tool_type: ToolSafetyLevel,
+        requires_approval: bool,
+        idempotent: bool,
+        effective_timeout: float | None,
+        roles: list[str] | None,
+        scopes: list[str] | None,
+    ) -> Any:
+        """
+        Single unified execution pipeline for BOTH REST and MCP.
+        Enforces identical security boundaries, bounds, timeouts, semaphores,
+        rate limiting, human approval, and audit hooks across both transports.
+        """
+        tool_name = ctx.tool_name
+        ctx.start_time = time.perf_counter()
+
+        try:
+            # 1. Trigger plugin before_execute hooks
+            await self.plugins.trigger_before_execute(ctx, kwargs)
+
+            # 2. Bound input payload size
+            check_input_bounds(kwargs, self.max_input_chars)
+
+            # 3. Idempotency deduplication check
+            idem_key = (
+                kwargs.get("idempotency_key")
+                or kwargs.get("idempotent_key")
+                or ctx.metadata.get("idempotency_key")
+            )
+            if idempotent and idem_key:
+                cache_key = f"{tool_name}:{idem_key}"
+                found, cached_val = await self._idempotency_cache.get(cache_key)
+                if found:
+                    logger.info(
+                        f"[{ctx.request_id}] Returning cached idempotent response for key '{idem_key}' on {ctx.transport}"
+                    )
+                    return cached_val
+
+            # 4. Rate limit check (FAILS CLOSED)
+            if self.rate_limit_hook:
+                try:
+                    if inspect.iscoroutinefunction(self.rate_limit_hook):
+                        allowed = await self.rate_limit_hook(tool_name, kwargs)
+                    else:
+                        allowed = await run_in_threadpool(self.rate_limit_hook, tool_name, kwargs)
+                    if not allowed:
+                        raise RateLimitExceededError(f"Rate limit exceeded for tool '{tool_name}'.")
+                except RateLimitExceededError:
+                    raise
+                except Exception as e:
+                    logger.error(f"[{ctx.request_id}] Rate limit hook failed: {e}")
+                    raise RateLimitExceededError(
+                        f"Rate limit verification failed for tool '{tool_name}'."
+                    )
+
+            # 5. Execution-time authorization check (TRUSTED CONTEXT ONLY)
+            if self.authorize_hook:
+                try:
+                    sig_auth = inspect.signature(self.authorize_hook)
+                    if len(sig_auth.parameters) >= 5:
+                        auth_call = self.authorize_hook(ctx, tool_name, kwargs, roles, scopes)
+                    else:
+                        auth_call = self.authorize_hook(tool_name, kwargs, roles, scopes)
+                    if inspect.iscoroutinefunction(self.authorize_hook):
+                        auth_ok = await auth_call
+                    else:
+                        auth_ok = auth_call
+                    if not auth_ok:
+                        raise AuthorizationError(
+                            f"Unauthorized: Caller is not authorized to execute tool '{tool_name}'."
+                        )
+                except AuthorizationError:
+                    raise
+                except Exception as e:
+                    logger.error(f"[{ctx.request_id}] Authorize hook error: {e}")
+                    raise AuthorizationError(f"Authorization check failed for tool '{tool_name}'.")
+
+            if roles:
+                # Require trusted caller permissions from context (NEVER caller-supplied kwargs)
+                if not any(r in ctx.permissions for r in roles):
+                    if not self.authorize_hook:
+                        raise AuthorizationError(
+                            f"Unauthorized: Caller lacks required role in trusted context: {roles}"
+                        )
+
+            # 6. Human approval check for sensitive / destructive operations (TRUSTED PROOF ONLY)
+            needs_approval = requires_approval or (tool_type == ToolSafetyLevel.DESTRUCTIVE)
+            if needs_approval:
+                if not self.approval_hook:
+                    raise HumanApprovalRequiredError(
+                        f"Action '{tool_name}' is classified as {tool_type.value} and requires human approval, "
+                        f"but no approval_hook is configured on the framework."
+                    )
+                approved = False
+                try:
+                    sig_app = inspect.signature(self.approval_hook)
+                    if len(sig_app.parameters) >= 4:
+                        app_call = self.approval_hook(ctx, tool_name, kwargs, tool_type)
+                    else:
+                        app_call = self.approval_hook(tool_name, kwargs, tool_type)
+                    if inspect.iscoroutinefunction(self.approval_hook):
+                        approved = await app_call
+                    else:
+                        approved = app_call
+                except Exception as e:
+                    logger.error(f"[{ctx.request_id}] Approval hook error: {e}")
+                    raise HumanApprovalRequiredError(
+                        f"Action '{tool_name}' is classified as {tool_type.value} and requires human approval."
+                    )
+
+                if not approved:
+                    raise HumanApprovalRequiredError(
+                        f"Action '{tool_name}' is classified as {tool_type.value} and requires human approval."
+                    )
+
+            # 7. Execute tool with concurrency limiting and timeout
+            async with self._concurrency_semaphore:
+                if inspect.iscoroutinefunction(func):
+                    exec_coro = func(*args, **kwargs)
+                else:
+                    exec_coro = run_in_threadpool(func, *args, **kwargs)
+
+                raw_result = await asyncio.wait_for(exec_coro, timeout=effective_timeout)
+
+            ctx.mark_completed()
+
+            # 8. Audit hook on success
+            if self.audit_hook:
+                try:
+                    audit_record = {
+                        "request_id": ctx.request_id,
+                        "transport": ctx.transport,
+                        "tool": tool_name,
+                        "tool_type": tool_type.value,
+                        "duration_ms": ctx.duration_ms,
+                        "status": "success",
+                    }
+                    if inspect.iscoroutinefunction(self.audit_hook):
+                        await self.audit_hook(audit_record)
+                    else:
+                        await run_in_threadpool(self.audit_hook, audit_record)
+                except Exception as ae:
+                    logger.warning(f"[{ctx.request_id}] Audit hook error: {ae}")
+
+            # 9. Bound output size to avoid LLM context window exhaustion
+            bounded_res = bound_output(raw_result, self.max_output_chars)
+
+            # 10. Cache idempotent result if key provided
+            if idempotent and idem_key:
+                cache_key = f"{tool_name}:{idem_key}"
+                await self._idempotency_cache.set(cache_key, bounded_res)
+
+            # 11. Trigger plugin after_execute hooks
+            final_res = await self.plugins.trigger_after_execute(ctx, bounded_res)
+            return final_res
+
+        except asyncio.CancelledError as ce:
+            ctx.mark_completed()
+            await self.plugins.trigger_on_error(ctx, ce)
+            logger.warning(f"[{ctx.request_id}] Tool '{tool_name}' execution was cancelled.")
+            raise
+
+        except TimeoutError as te:
+            ctx.mark_completed()
+            await self.plugins.trigger_on_error(ctx, te)
+            duration_ms = (time.perf_counter() - ctx.start_time) * 1000
+            logger.error(f"[{ctx.request_id}] Tool '{tool_name}' timed out after {effective_timeout}s.")
+            raise ToolTimeoutError(f"Tool '{tool_name}' timed out after {effective_timeout}s.")
+
+        except (
+            SecurityConfigurationError,
+            AuthorizationError,
+            HumanApprovalRequiredError,
+            PayloadTooLargeError,
+            RateLimitExceededError,
+            ToolTimeoutError,
+        ) as domain_err:
+            ctx.mark_completed()
+            await self.plugins.trigger_on_error(ctx, domain_err)
+            duration_ms = (time.perf_counter() - ctx.start_time) * 1000
+            logger.warning(
+                f"[{ctx.request_id}] Tool '{tool_name}' rejected on {ctx.transport}: {domain_err}"
+            )
+            raise
+
+        except Exception as e:
+            ctx.mark_completed()
+            await self.plugins.trigger_on_error(ctx, e)
+            duration_ms = (time.perf_counter() - ctx.start_time) * 1000
+            sanitized_msg = sanitize_message(str(e))
+            logger.error(
+                f"[{ctx.request_id}] Error in tool '{tool_name}' on {ctx.transport} "
+                f"({duration_ms:.2f}ms): {sanitized_msg}"
+            )
+
+            if self.audit_hook:
+                try:
+                    audit_record = {
+                        "request_id": ctx.request_id,
+                        "transport": ctx.transport,
+                        "tool": tool_name,
+                        "tool_type": tool_type.value,
+                        "duration_ms": duration_ms,
+                        "status": "error",
+                        "error": sanitized_msg,
+                    }
+                    if inspect.iscoroutinefunction(self.audit_hook):
+                        await self.audit_hook(audit_record)
+                    else:
+                        await run_in_threadpool(self.audit_hook, audit_record)
+                except Exception:
+                    pass
+
+            raise
 
     # ─────────────────────────────────────────────
     # INTERNAL MCP REGISTRATION HELPER
@@ -264,176 +489,47 @@ class UnifiedNexus:
         effective_timeout = timeout or self.default_timeout
 
         @functools.wraps(func)
-        async def unified_wrapper(*args, **kwargs):
+        async def mcp_wrapper(*args, **kwargs):
             request_id = str(uuid.uuid4())
-            start_time = time.perf_counter()
             ctx = NexusContext(
                 transport="mcp",
                 tool_name=tool_name,
                 request_id=request_id,
-                principal=kwargs.get("__principal__") or kwargs.get("user_id"),
-                permissions=set(roles or []),
+                permissions=set(),
                 metadata={"tool_type": tool_type.value},
-                start_time=start_time,
             )
 
             try:
-                # 1. Trigger plugin before_execute hooks
-                await self.plugins.trigger_before_execute(ctx, kwargs)
-
-                # Bound input payload size
-                check_input_bounds(kwargs, self.max_input_chars)
-
-                # Rate limit check
-                if self.rate_limit_hook:
-                    try:
-                        if inspect.iscoroutinefunction(self.rate_limit_hook):
-                            allowed = await self.rate_limit_hook(tool_name, kwargs)
-                        else:
-                            allowed = await run_in_threadpool(self.rate_limit_hook, tool_name, kwargs)
-                        if not allowed:
-                            raise RateLimitExceededError(f"Rate limit exceeded for tool '{tool_name}'.")
-                    except RateLimitExceededError:
-                        raise
-                    except Exception as e:
-                        logger.warning(f"[{request_id}] Rate limit hook error: {e}")
-
-                # Execution-time authorization check
-                if self.authorize_hook:
-                    try:
-                        if inspect.iscoroutinefunction(self.authorize_hook):
-                            auth_ok = await self.authorize_hook(tool_name, kwargs, roles, scopes)
-                        else:
-                            auth_ok = await run_in_threadpool(self.authorize_hook, tool_name, kwargs, roles, scopes)
-                        if not auth_ok:
-                            raise AuthorizationError(
-                                f"Unauthorized: Caller is not authorized to execute tool '{tool_name}'."
-                            )
-                    except AuthorizationError:
-                        raise
-                    except Exception as e:
-                        logger.error(f"[{request_id}] Authorize hook error: {e}")
-                        raise AuthorizationError(f"Authorization check failed for tool '{tool_name}'.")
-
-                if roles:
-                    caller_role = kwargs.get("caller_role") or kwargs.get("role")
-                    if caller_role not in roles:
-                        raise AuthorizationError(f"Unauthorized: Caller lacks required role: {roles}")
-
-                # Human approval check for sensitive / destructive operations
-                needs_approval = requires_approval or (tool_type == ToolSafetyLevel.DESTRUCTIVE)
-                if needs_approval:
-                    approved = False
-                    if self.approval_hook:
-                        try:
-                            if inspect.iscoroutinefunction(self.approval_hook):
-                                approved = await self.approval_hook(tool_name, kwargs, tool_type)
-                            else:
-                                approved = await run_in_threadpool(self.approval_hook, tool_name, kwargs, tool_type)
-                        except Exception as e:
-                            logger.error(f"[{request_id}] Approval hook error: {e}")
-                    elif kwargs.get("__approved__") is True:
-                        approved = True
-
-                    if not approved:
-                        raise HumanApprovalRequiredError(
-                            f"Action '{tool_name}' is classified as {tool_type.value} and requires human approval."
-                        )
-
-                # Execute tool with concurrency limiting and timeout
-                async with self._concurrency_semaphore:
-                    if inspect.iscoroutinefunction(func):
-                        exec_coro = func(*args, **kwargs)
-                    else:
-                        exec_coro = run_in_threadpool(func, *args, **kwargs)
-
-                    raw_result = await asyncio.wait_for(exec_coro, timeout=effective_timeout)
-
-                ctx.mark_completed()
-
-                # Audit hook on success
-                if self.audit_hook:
-                    try:
-                        audit_record = {
-                            "request_id": request_id,
-                            "tool": tool_name,
-                            "tool_type": tool_type.value,
-                            "duration_ms": ctx.duration_ms,
-                            "status": "success",
-                        }
-                        if inspect.iscoroutinefunction(self.audit_hook):
-                            await self.audit_hook(audit_record)
-                        else:
-                            await run_in_threadpool(self.audit_hook, audit_record)
-                    except Exception as ae:
-                        logger.warning(f"[{request_id}] Audit hook error: {ae}")
-
-                # Bound output size to avoid LLM context window exhaustion
-                bounded_res = bound_output(raw_result, self.max_output_chars)
-
-                # 2. Trigger plugin after_execute hooks
-                final_res = await self.plugins.trigger_after_execute(ctx, bounded_res)
-                return final_res
-
-            except asyncio.CancelledError as ce:
-                ctx.mark_completed()
-                await self.plugins.trigger_on_error(ctx, ce)
-                logger.warning(f"[{request_id}] Tool '{tool_name}' execution was cancelled.")
-                raise
-
-            except TimeoutError as te:
-                ctx.mark_completed()
-                await self.plugins.trigger_on_error(ctx, te)
-                duration_ms = (time.perf_counter() - start_time) * 1000
-                logger.error(f"[{request_id}] Tool '{tool_name}' timed out after {effective_timeout}s.")
-                raise ToolError(f"Tool '{tool_name}' timed out after {effective_timeout}s.")
-
+                return await self._execute_unified_pipeline(
+                    ctx=ctx,
+                    func=func,
+                    args=args,
+                    kwargs=kwargs,
+                    tool_type=tool_type,
+                    requires_approval=requires_approval,
+                    idempotent=idempotent,
+                    effective_timeout=effective_timeout,
+                    roles=roles,
+                    scopes=scopes,
+                )
             except (
                 SecurityConfigurationError,
                 AuthorizationError,
                 HumanApprovalRequiredError,
                 PayloadTooLargeError,
                 RateLimitExceededError,
+                ToolTimeoutError,
+                TimeoutError,
             ) as domain_err:
-                ctx.mark_completed()
-                await self.plugins.trigger_on_error(ctx, domain_err)
-                duration_ms = (time.perf_counter() - start_time) * 1000
-                logger.warning(f"[{request_id}] Tool '{tool_name}' rejected: {domain_err}")
                 raise ToolError(str(domain_err))
-
+            except ToolError:
+                raise
             except Exception as e:
-                ctx.mark_completed()
-                await self.plugins.trigger_on_error(ctx, e)
-                duration_ms = (time.perf_counter() - start_time) * 1000
                 sanitized_msg = sanitize_message(str(e))
-                logger.error(f"[{request_id}] Error in tool '{tool_name}' ({duration_ms:.2f}ms): {sanitized_msg}")
-
-                if self.audit_hook:
-                    try:
-                        audit_record = {
-                            "request_id": request_id,
-                            "tool": tool_name,
-                            "tool_type": tool_type.value,
-                            "duration_ms": duration_ms,
-                            "status": "error",
-                            "error": sanitized_msg,
-                        }
-                        if inspect.iscoroutinefunction(self.audit_hook):
-                            await self.audit_hook(audit_record)
-                        else:
-                            await run_in_threadpool(self.audit_hook, audit_record)
-                    except Exception:
-                        pass
-
-                return {
-                    "error": sanitized_msg,
-                    "tool": tool_name,
-                    "hint": f"Check the parameters passed to '{tool_name}'. {sanitized_msg}",
-                }
+                # MUST raise ToolError so FastMCP signals error to client (isError: true)
+                raise ToolError(f"Error executing tool '{tool_name}': {sanitized_msg}")
 
         doc = description or (func.__doc__.strip().split("\n")[0] if func.__doc__ else None)
-
-        # FastMCP tool-level auth check (when explicitly provided)
         mcp_tool_auth = auth
 
         try:
@@ -442,7 +538,7 @@ class UnifiedNexus:
                 description=doc,
                 timeout=effective_timeout,
                 auth=mcp_tool_auth,
-            )(unified_wrapper)
+            )(mcp_wrapper)
             self._registered_mcp_tools.add(tool_name)
         except Exception as e:
             logger.warning(f"Could not register '{tool_name}' as MCP tool: {e}")
@@ -608,6 +704,9 @@ class UnifiedNexus:
                 "tool_type": safety_level,
                 "requires_approval": requires_approval,
                 "idempotent": idempotent,
+                "timeout": timeout,
+                "roles": roles,
+                "scopes": scopes,
             })
 
             return func
@@ -719,40 +818,67 @@ class UnifiedNexus:
         return health_probe
 
     def _create_rest_endpoint_wrapper(self, ep: dict) -> Callable[..., Any]:
-        """Creates an execution wrapper for REST endpoints that executes plugin interceptors."""
+        """Creates an execution wrapper for REST endpoints that executes the unified pipeline."""
         func = ep["func"]
         tool_name = ep["name"]
         tool_type = ep["tool_type"]
+        requires_approval = ep.get("requires_approval", False)
+        idempotent = ep.get("idempotent", False)
+        timeout = ep.get("timeout") or self.default_timeout
+        roles = ep.get("roles")
+        scopes = ep.get("scopes")
 
         @functools.wraps(func)
         async def rest_wrapper(*args, **kwargs):
-            if not self.plugins.plugins:
-                if inspect.iscoroutinefunction(func):
-                    return await func(*args, **kwargs)
-                return await run_in_threadpool(func, *args, **kwargs)
-
             request_id = str(uuid.uuid4())
             ctx = NexusContext(
                 transport="rest",
                 tool_name=tool_name,
                 request_id=request_id,
+                permissions=set(),
                 metadata={"tool_type": tool_type.value},
             )
 
+            # Extract trusted caller identity from Request state if available
+            for arg in args:
+                if isinstance(arg, Request):
+                    if hasattr(arg.state, "user"):
+                        ctx.principal = arg.state.user
+                    if hasattr(arg.state, "permissions"):
+                        ctx.permissions = set(arg.state.permissions)
+            if "request" in kwargs and isinstance(kwargs["request"], Request):
+                req = kwargs["request"]
+                if hasattr(req.state, "user"):
+                    ctx.principal = req.state.user
+                if hasattr(req.state, "permissions"):
+                    ctx.permissions = set(req.state.permissions)
+
             try:
-                await self.plugins.trigger_before_execute(ctx, kwargs)
-
-                if inspect.iscoroutinefunction(func):
-                    res = await func(*args, **kwargs)
-                else:
-                    res = await run_in_threadpool(func, *args, **kwargs)
-
-                ctx.mark_completed()
-                res = await self.plugins.trigger_after_execute(ctx, res)
-                return res
-            except Exception as e:
-                ctx.mark_completed()
-                await self.plugins.trigger_on_error(ctx, e)
+                return await self._execute_unified_pipeline(
+                    ctx=ctx,
+                    func=func,
+                    args=args,
+                    kwargs=kwargs,
+                    tool_type=tool_type,
+                    requires_approval=requires_approval,
+                    idempotent=idempotent,
+                    effective_timeout=timeout,
+                    roles=roles,
+                    scopes=scopes,
+                )
+            except AuthorizationError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+            except HumanApprovalRequiredError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+            except RateLimitExceededError as e:
+                raise HTTPException(status_code=429, detail=str(e))
+            except PayloadTooLargeError as e:
+                raise HTTPException(status_code=413, detail=str(e))
+            except (ToolTimeoutError, TimeoutError) as e:
+                raise HTTPException(status_code=504, detail=str(e))
+            except SecurityConfigurationError as e:
+                raise HTTPException(status_code=500, detail=str(e))
+            except Exception:
                 raise
 
         return rest_wrapper
@@ -832,10 +958,12 @@ class UnifiedNexus:
                 if r["expose"] in (ExposureMode.BOTH, ExposureMode.API):
                     clean_r_prefix = r["prefix"] if r["prefix"].startswith("/") else ("/" + r["prefix"] if r["prefix"] else "")
                     full_r_prefix = f"{clean_api_prefix}{clean_r_prefix}" if clean_api_prefix else clean_r_prefix
+                    dependencies = [self.rest_auth] if self.rest_auth is not None else None
                     app.include_router(
                         r["router"],
                         prefix=full_r_prefix,
                         tags=r["tags"],
+                        dependencies=dependencies,
                     )
 
         # 2. Mount FastMCP and compose lifespan if active_mode includes MCP
@@ -968,10 +1096,12 @@ class UnifiedNexus:
             # Strictly include only routers configured for BOTH or API (NEVER MCP-only)
             for r in self._routers:
                 if r["expose"] in (ExposureMode.BOTH, ExposureMode.API):
+                    dependencies = [self.rest_auth] if self.rest_auth is not None else None
                     self.api.include_router(
                         r["router"],
                         prefix=r["prefix"],
                         tags=r["tags"],
+                        dependencies=dependencies,
                     )
 
         # 5. Mount MCP if mode includes MCP

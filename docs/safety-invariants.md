@@ -47,13 +47,23 @@ def verify_approval(tool_name: str, kwargs: dict) -> bool:
 nexus = UnifiedNexus("DestructiveService", approval_hook=verify_approval)
 ```
 
-If the hook returns `False`, execution is rejected with `HumanApprovalRequiredError` before the underlying function executes.
+- If no `approval_hook` is configured on `UnifiedNexus`, destructive operations immediately raise `HumanApprovalRequiredError` to prevent unreviewed execution.
+- Magic arguments like `__approved__=True` are explicitly blocked and cannot bypass verification.
 
 ---
 
-## 3. Idempotency Guarantees
+## 3. Idempotency Guarantees & Deduplication
 
 AI agents frequently encounter transport timeouts or parse errors, leading to automated retries. Tools decorated with `idempotent=True` publish schema annotations signaling to LLM hosts that repeated calls with the same arguments will not produce duplicate side effects.
+
+Furthermore, UnifiedNexus provides an in-memory, thread-safe `IdempotencyCache` with TTL and LRU eviction:
+```python
+from unified_nexus import IdempotencyCache
+
+cache = IdempotencyCache(ttl_seconds=300.0, max_entries=1000)
+nexus = UnifiedNexus("Api", idempotency_cache=cache)
+```
+When an agent calls an idempotent tool with an `idempotency_key`, UnifiedNexus caches the returned response. Identical subsequent calls return the cached response without re-executing business logic or creating duplicate side effects.
 
 ---
 

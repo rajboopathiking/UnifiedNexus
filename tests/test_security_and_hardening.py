@@ -16,6 +16,7 @@ from fastmcp.exceptions import ToolError
 from unified_nexus import (
     DuplicateRouteError,
     DuplicateToolError,
+    NexusContext,
     SecurityConfigurationError,
     ToolSafetyLevel,
     UnifiedNexus,
@@ -136,8 +137,9 @@ async def test_exceptions_never_reveal_secrets():
         )
 
     tool = await nexus.mcp.get_tool("leak_test")
-    res = await tool.run({})
-    res_str = str(res)
+    with pytest.raises(ToolError) as exc_info:
+        await tool.run({})
+    res_str = str(exc_info.value)
 
     assert "super_secret_pw123" not in res_str
     assert "eyJhbGciOi" not in res_str
@@ -291,25 +293,27 @@ async def test_human_approval_hook_for_destructive_actions():
 # ─────────────────────────────────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_execution_time_authorization_hook():
-    def custom_authorizer(tool_name: str, kwargs: dict, roles: list, scopes: list) -> bool:
-        caller_role = kwargs.get("caller_role")
-        return caller_role == "admin"
+    trusted_caller_role = "guest"
+
+    def custom_authorizer(ctx: NexusContext, tool_name: str, kwargs: dict, roles: list, scopes: list) -> bool:
+        return trusted_caller_role in roles
 
     nexus = UnifiedNexus("AuthApp", authorize_hook=custom_authorizer)
 
     @nexus.universal_tool(roles=["admin"])
-    def admin_action(caller_role: str = "guest"):
-        return {"admin": True}
+    def admin_action(target_system: str):
+        return {"admin": True, "target": target_system}
 
     tool = await nexus.mcp.get_tool("admin_action")
 
-    # Caller with guest role is rejected
+    # Caller with trusted guest role is rejected
     with pytest.raises(ToolError) as exc_auth:
-        await tool.run({"caller_role": "guest"})
+        await tool.run({"target_system": "prod"})
     assert "Unauthorized" in str(exc_auth.value)
 
-    # Caller with admin role is permitted
-    res = await tool.run({"caller_role": "admin"})
+    # Caller with trusted admin role is permitted
+    trusted_caller_role = "admin"
+    res = await tool.run({"target_system": "prod"})
     assert "True" in str(res)
 
 

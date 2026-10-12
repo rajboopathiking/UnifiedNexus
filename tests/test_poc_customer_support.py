@@ -102,13 +102,10 @@ def create_support_nexus():
     @nexus.universal_tool(
         path="/tickets/create",
         tool_type=ToolSafetyLevel.ACTION,
-        roles=["support_agent", "customer", "admin"],
+        idempotent=True,
     )
-    def create_ticket(ticket: CreateTicketRequest, caller_role: str = "customer") -> dict:
+    def create_ticket(ticket: CreateTicketRequest) -> dict:
         """Creates a customer support ticket with idempotency handling."""
-        if caller_role not in ["support_agent", "customer", "admin"]:
-            raise AuthorizationError(f"Role '{caller_role}' is not authorized to create tickets.")
-
         # Idempotency check: if ticket with this key already exists, return existing record
         if ticket.idempotency_key and ticket.idempotency_key in TICKETS_DB:
             return {"status": "existing", "ticket": TICKETS_DB[ticket.idempotency_key]}
@@ -150,9 +147,10 @@ def test_customer_support_scenarios_over_rest():
         assert res_order_ok.status_code == 200
         assert res_order_ok.json()["customer_id"] == "cust_alice"
 
-        # Check order over REST: Caller attempts accessing another user's order -> 500/AuthorizationError
-        with pytest.raises(AuthorizationError):
-            client.get("/orders/check?order_id=ORD-101&caller_id=cust_attacker")
+        # Check order over REST: Caller attempts accessing another user's order -> 403 Forbidden
+        res_unauth = client.get("/orders/check?order_id=ORD-101&caller_id=cust_attacker")
+        assert res_unauth.status_code == 403
+        assert "Unauthorized" in res_unauth.json()["detail"]
 
         # 3. Create ticket over REST with idempotency
         payload = {
@@ -208,7 +206,6 @@ async def test_customer_support_scenarios_over_mcp():
                 "description": "Screen is cracked upon unboxing.",
                 "idempotency_key": "idemp-key-bob-1",
             },
-            "caller_role": "customer",
         }
         ticket_res1 = await ticket_tool.run(ticket_data)
         assert "created" in str(ticket_res1)

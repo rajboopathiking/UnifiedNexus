@@ -18,6 +18,7 @@ from unified_nexus.exceptions import (
     UnifiedNexusError,
 )
 from unified_nexus.plugins import NexusPlugin, PluginManager
+from unified_nexus.security import IdempotencyCache
 from unified_nexus.unified_nexus import (
     ExposureMode,
     ToolSafetyLevel,
@@ -32,6 +33,7 @@ __all__ = [
     "DuplicateToolError",
     "ExposureMode",
     "HumanApprovalRequiredError",
+    "IdempotencyCache",
     "NexusContext",
     "NexusPlugin",
     "PayloadTooLargeError",
@@ -43,4 +45,7 @@ __all__ = [
     "UnifiedNexus",
     "UnifiedNexusError",
     "normalize_exposure",
+    "__version__",
 ]
+
+__version__ = "0.2.0"

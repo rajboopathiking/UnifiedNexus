@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 import pytest
 from fastapi.testclient import TestClient
+from fastmcp.exceptions import ToolError
 
 from unified_nexus import (
     ExposureMode,
@@ -109,8 +110,9 @@ async def test_plugin_mcp_interception():
         assert "after:mcp:calculate" in plugin.events
 
         fail_tool = await nexus.mcp.get_tool("mcp_fail")
-        fail_res = await fail_tool.run({})
-        assert "Simulated MCP tool failure" in str(fail_res)
+        with pytest.raises(ToolError) as exc_fail:
+            await fail_tool.run({})
+        assert "Simulated MCP tool failure" in str(exc_fail.value)
         assert "error:mcp:mcp_fail:RuntimeError" in plugin.events
 
 
